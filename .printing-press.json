@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "api_name": "mt5",
+  "display_name": "MetaTrader 5",
+  "cli_name": "mt5-pp-cli",
+  "owner": "mvanhorn",
+  "printer": "mvanhorn",
+  "printer_name": "Matt Van Horn",
+  "spec_format": "internal",
+  "auth_type": "broker_login",
+  "auth_env_vars": [
+    "MT5_PASSWORD"
+  ],
+  "novel_features": [
+    {
+      "name": "Compound write from SQL predicate",
+      "command": "pp-mt5 close all --filter \"profit<-500 and pips<-50\"",
+      "description": "Resolve open positions via SQL predicate against the local mirror, then bulk-close in one round trip with one safety hash. Powers the hero command."
+    },
+    {
+      "name": "Local SQLite mirror of MT5 state",
+      "command": "pp-mt5 sync all && pp-mt5 sql \"...\"",
+      "description": "Symbols, ticks, bars (per timeframe), orders, deals, positions, calendar, features, backtests mirrored to ~/.local/share/mt5-pp-cli/store.db. Microsecond reads instead of 50ms bridge round-trips."
+    },
+    {
+      "name": "Defense-in-depth safety layer",
+      "command": "pp-mt5 order send ...",
+      "description": "Every write requires MT5_LIVE=1 env AND --i-understand-this-is-live flag AND --confirm <sha256> hash within 60s. Kill switch file, max volume per order, max daily loss all enforced before the bridge sees the request."
+    },
+    {
+      "name": "Tick-accurate replay engine",
+      "command": "pp-mt5 replay --symbol EURUSD --speed 100x",
+      "description": "Stream historical bars/ticks from the local mirror to stdout JSONL. Pipe into a strategy script for offline development."
+    },
+    {
+      "name": "Quant export to parquet/csv/jsonl",
+      "command": "pp-mt5 bars export --symbols 'EUR*' --since 2y --out parquet",
+      "description": "Bulk export bars and ticks across symbol filters and date ranges, reading from the local mirror — never touches the bridge."
+    }
+  ],
+  "exit_codes": {
+    "0":  "ok",
+    "2":  "usage",
+    "3":  "not found",
+    "4":  "auth",
+    "5":  "broker rejected",
+    "6":  "safety-layer rejected",
+    "7":  "rate limited",
+    "10": "config",
+    "11": "MT5 terminal unreachable"
+  },
+  "sibling_clis": [
+    {
+      "name": "pp-mt5-backtester",
+      "path": "library/finance/mt5-backtester",
+      "purpose": "Headless terminal64.exe + .ini strategy-tester runs. Different transport, no overlap."
+    }
+  ]
+}
