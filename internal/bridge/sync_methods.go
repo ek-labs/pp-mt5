@@ -217,3 +217,103 @@ func (b *Bridge) CopyTicksRange(symbol string, fromUnix, toUnix int64, flags str
 	}
 	return out, nil
 }
+
+// ── live single-symbol reads ─────────────────────────────────────────────────
+
+// SymbolInfoFull mirrors mt5.symbol_info()._asdict() with the fields we read
+// out. Many more exist; broker-specific ones are deliberately ignored.
+type SymbolInfoFull struct {
+	Name              string  `json:"name"`
+	Description       string  `json:"description"`
+	Currency          string  `json:"currency_base"`
+	CurrencyProfit    string  `json:"currency_profit"`
+	Digits            int     `json:"digits"`
+	Point             float64 `json:"point"`
+	Spread            int     `json:"spread"`
+	SpreadFloat       bool    `json:"spread_float"`
+	TradeContractSize float64 `json:"trade_contract_size"`
+	TradeTickSize     float64 `json:"trade_tick_size"`
+	TradeTickValue    float64 `json:"trade_tick_value"`
+	VolumeMin         float64 `json:"volume_min"`
+	VolumeMax         float64 `json:"volume_max"`
+	VolumeStep        float64 `json:"volume_step"`
+	TradeMode         int     `json:"trade_mode"`
+	Bid               float64 `json:"bid"`
+	Ask               float64 `json:"ask"`
+	Last              float64 `json:"last"`
+	Time              int64   `json:"time"`
+	Visible           bool    `json:"visible"`
+	Select            bool    `json:"select"`
+}
+
+// SymbolTick is the snapshot returned by mt5.symbol_info_tick().
+type SymbolTick struct {
+	Time       int64   `json:"time"`
+	TimeMSC    int64   `json:"time_msc"`
+	Bid        float64 `json:"bid"`
+	Ask        float64 `json:"ask"`
+	Last       float64 `json:"last"`
+	Volume     float64 `json:"volume"`
+	Flags      int     `json:"flags"`
+	VolumeReal float64 `json:"volume_real"`
+}
+
+// BookItem is one rung of the depth-of-market book.
+type BookItem struct {
+	Type   int     `json:"type"`   // 1=sell 2=buy 3=sell_market 4=buy_market 5=sell_limit 6=buy_limit 7=sell_stop 8=buy_stop
+	Price  float64 `json:"price"`
+	Volume float64 `json:"volume"`
+}
+
+// SymbolInfo fetches the full symbol record (live).
+func (b *Bridge) SymbolInfo(symbol string) (*SymbolInfoFull, error) {
+	var out SymbolInfoFull
+	if err := b.Call("symbol_info", map[string]any{"symbol": symbol}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SymbolInfoTick returns the most recent tick for the symbol.
+func (b *Bridge) SymbolInfoTick(symbol string) (*SymbolTick, error) {
+	var out SymbolTick
+	if err := b.Call("symbol_info_tick", map[string]any{"symbol": symbol}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// MarketBookGet returns the current depth book for symbol. Caller is
+// responsible for subscribing/unsubscribing via the matching add/release; for
+// a one-shot read this call subscribes implicitly.
+func (b *Bridge) MarketBookGet(symbol string) ([]BookItem, error) {
+	var out []BookItem
+	if err := b.Call("market_book_get", map[string]any{"symbol": symbol}, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// OrderCalcMargin calls mt5.order_calc_margin(action, symbol, volume, price).
+// action: 0=BUY 1=SELL (and the limit/stop variants if used).
+func (b *Bridge) OrderCalcMargin(action int, symbol string, volume, price float64) (float64, error) {
+	var out float64
+	if err := b.Call("order_calc_margin", map[string]any{
+		"action": action, "symbol": symbol, "volume": volume, "price": price,
+	}, &out); err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+// OrderCalcProfit calls mt5.order_calc_profit(action, symbol, volume, price_open, price_close).
+func (b *Bridge) OrderCalcProfit(action int, symbol string, volume, priceOpen, priceClose float64) (float64, error) {
+	var out float64
+	if err := b.Call("order_calc_profit", map[string]any{
+		"action": action, "symbol": symbol, "volume": volume,
+		"price_open": priceOpen, "price_close": priceClose,
+	}, &out); err != nil {
+		return 0, err
+	}
+	return out, nil
+}

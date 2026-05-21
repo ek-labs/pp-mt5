@@ -145,15 +145,27 @@ def h_terminal_info(params: dict) -> Any:
 # Symbols
 def h_symbols_total(params: dict) -> Any: return mt5.symbols_total()
 def h_symbols_get(params: dict) -> Any: return _to_dict(mt5.symbols_get(**params))
-def h_symbol_info(params: dict) -> Any: return _to_dict(mt5.symbol_info(params["symbol"]))
-def h_symbol_info_tick(params: dict) -> Any: return _to_dict(mt5.symbol_info_tick(params["symbol"]))
+def h_symbol_info(params: dict) -> Any:
+    _ensure_selected(params["symbol"])
+    return _to_dict(mt5.symbol_info(params["symbol"]))
+
+def h_symbol_info_tick(params: dict) -> Any:
+    _ensure_selected(params["symbol"])
+    return _to_dict(mt5.symbol_info_tick(params["symbol"]))
+
 def h_symbol_select(params: dict) -> Any: return {"ok": mt5.symbol_select(params["symbol"], params.get("enable", True))}
 
 
-# Market book
+# Market book — get implicitly subscribes; broker must support DOM.
 def h_market_book_add(params: dict) -> Any: return {"ok": mt5.market_book_add(params["symbol"])}
-def h_market_book_get(params: dict) -> Any: return _to_dict(mt5.market_book_get(params["symbol"]))
 def h_market_book_release(params: dict) -> Any: return {"ok": mt5.market_book_release(params["symbol"])}
+def h_market_book_get(params: dict) -> Any:
+    sym = params["symbol"]
+    _ensure_selected(sym)
+    # market_book_add returning False is broker-dependent: some report "no DOM"
+    # this way, others succeed and return depth on the next get. We try both.
+    mt5.market_book_add(sym)
+    return _to_dict(mt5.market_book_get(sym)) or []
 
 
 # Bars + ticks — normalize timeframe strings ("M5") and unix-int dates to MT5 types.
@@ -248,8 +260,18 @@ def h_copy_ticks_range(params: dict) -> Any:
 # Orders / positions / history
 def h_orders_total(params: dict) -> Any: return mt5.orders_total()
 def h_orders_get(params: dict) -> Any: return _to_dict(mt5.orders_get(**params))
-def h_order_calc_margin(params: dict) -> Any: return mt5.order_calc_margin(**params)
-def h_order_calc_profit(params: dict) -> Any: return mt5.order_calc_profit(**params)
+def h_order_calc_margin(params: dict) -> Any:
+    _ensure_selected(params["symbol"])
+    return mt5.order_calc_margin(
+        params["action"], params["symbol"], params["volume"], params["price"],
+    )
+
+def h_order_calc_profit(params: dict) -> Any:
+    _ensure_selected(params["symbol"])
+    return mt5.order_calc_profit(
+        params["action"], params["symbol"], params["volume"],
+        params["price_open"], params["price_close"],
+    )
 def h_order_check(params: dict) -> Any: return _to_dict(mt5.order_check(params["request"]))
 def h_order_send(params: dict) -> Any:
     res = mt5.order_send(params["request"])
