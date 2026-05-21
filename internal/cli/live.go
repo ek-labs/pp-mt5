@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -12,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/bridge"
+	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/config"
 	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/safety"
 	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/store"
 )
@@ -371,7 +376,7 @@ func printOrders(w io.Writer, v any) {
 	fmt.Fprintf(w, "\n(%d order%s)\n", len(rows), pluralS(len(rows)))
 }
 
-// ── order check (preview, read-only) + order send (Phase 7) ─────────────────
+// ── order check (read-only preview) ──────────────────────────────────────────
 
 func newOrderCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "order", Short: "Place/preview a new order"}
@@ -406,9 +411,6 @@ func newOrderCheckCmd() *cobra.Command {
 			if err := b.Initialize(defaultInit(10000)); err != nil {
 				return mapBridgeErr(err)
 			}
-			// order_check requires the full request struct, not the helper calls.
-			// Build it and call via the low-level Call so we don't have to add
-			// another typed wrapper here.
 			tick, _ := b.SymbolInfoTick(symbol)
 			if price == 0 && tick != nil {
 				if action == 0 {
@@ -417,19 +419,9 @@ func newOrderCheckCmd() *cobra.Command {
 					price = tick.Bid
 				}
 			}
-			req := map[string]any{
-				"action": 1, // TRADE_ACTION_DEAL (market). Pending types Phase 7.
-				"symbol": symbol, "volume": volume, "type": action,
-				"price": price, "deviation": 20,
-			}
-			if sl > 0 {
-				req["sl"] = sl
-			}
-			if tp > 0 {
-				req["tp"] = tp
-			}
-			var res map[string]any
-			if err := b.Call("order_check", map[string]any{"request": req}, &res); err != nil {
+			req := buildMarketRequest(symbol, action, volume, price, sl, tp, 0, "", 20)
+			res, err := b.OrderCheck(req)
+			if err != nil {
 				return mapBridgeErr(err)
 			}
 			return emit(cmd, res, func(w io.Writer, v any) {
@@ -456,25 +448,64 @@ func newOrderCheckCmd() *cobra.Command {
 	return cmd
 }
 
+// ── order send (write — full safety flow) ────────────────────────────────────
+
 func newOrderSendCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "send",
-		Short: "Place a market or pending order (DRY-RUN by default; requires safety hash)",
-		Long: `Place an order on the connected broker.
+		Short: "Place a market order (DRY-RUN by default; requires safety hash)",
+		Long: `Place a market order on the connected broker.
 
 Safety flow:
-  1. First run prints a SHA-256 hash of the canonical request and exits with code 6.
-  2. To actually send, re-run with --confirm <hash> within 60 seconds.
-  3. Live writes additionally require MT5_LIVE=1 AND --i-understand-this-is-live.
+  1. First run prints a SHA-256 hash of the canonical request and exits 6.
+  2. Re-run with --confirm <hash> within 60 seconds to actually send.
+  3. Real-account writes additionally require MT5_LIVE=1 AND
+     --i-understand-this-is-live (skipped on demo and contest accounts).
   4. Per-command guardrails from ~/.config/mt5-pp-cli/config.toml apply.
-  5. Successful send is appended to ~/.local/share/mt5-pp-cli/audit.jsonl.
-
-Implementation lands in Phase 7. For preview today, use 'pp-mt5 order check'.`,
+  5. Every attempt is appended to <store_dir>/audit.jsonl AND the audit DB
+     table (queryable via 'pp-mt5 sql').`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := safety.PrecheckWrite(cmd); err != nil {
-				return &ExitErr{Code: ExitSafetyRejected, Err: err}
+			symbol, _ := cmd.Flags().GetString("symbol")
+			sideStr, _ := cmd.Flags().GetString("side")
+			volume, _ := cmd.Flags().GetFloat64("volume")
+			price, _ := cmd.Flags().GetFloat64("price")
+			sl, _ := cmd.Flags().GetFloat64("sl")
+			tp, _ := cmd.Flags().GetFloat64("tp")
+			magic, _ := cmd.Flags().GetInt64("magic")
+			comment, _ := cmd.Flags().GetString("comment")
+			deviation, _ := cmd.Flags().GetInt("deviation")
+
+			if symbol == "" || sideStr == "" || volume == 0 {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--symbol, --side, --volume are required")}
 			}
-			return notImpl("Phase 7")
+			action, err := parseOrderSide(sideStr)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: err}
+			}
+			ctx := writeCtx{cmd: cmd, opName: "order_send"}
+			b, db, acc, g, err := ctx.openAll()
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+
+			if price == 0 {
+				tick, _ := b.SymbolInfoTick(symbol)
+				if tick != nil {
+					if action == 0 {
+						price = tick.Ask
+					} else {
+						price = tick.Bid
+					}
+				}
+			}
+			req := buildMarketRequest(symbol, action, volume, price, sl, tp, magic, comment, deviation)
+
+			if err := safety.CheckGuardrails(g, volume); err != nil {
+				return ctx.reject(db, acc.Login, req, err)
+			}
+			return ctx.runOrderSend(b, db, acc, req)
 		},
 	}
 	addOrderFlags(cmd)
@@ -484,34 +515,70 @@ Implementation lands in Phase 7. For preview today, use 'pp-mt5 order check'.`,
 
 func addOrderFlags(cmd *cobra.Command) {
 	cmd.Flags().String("symbol", "", "Symbol (required)")
-	cmd.Flags().String("side", "", "buy | sell | buy_limit | sell_limit | buy_stop | sell_stop")
+	cmd.Flags().String("side", "", "buy | sell")
 	cmd.Flags().Float64("volume", 0, "Lot size (required)")
-	cmd.Flags().Float64("price", 0, "Limit/stop price (pending orders only)")
+	cmd.Flags().Float64("price", 0, "Override execution price (default: current ask/bid)")
 	cmd.Flags().Float64("sl", 0, "Stop loss price")
 	cmd.Flags().Float64("tp", 0, "Take profit price")
 	cmd.Flags().Int64("magic", 0, "EA magic number")
 	cmd.Flags().String("comment", "", "Order comment")
 	cmd.Flags().Int("deviation", 20, "Max price deviation in points")
-	cmd.Flags().String("type-filling", "", "IOC | FOK | RETURN (broker-supported subset)")
-	cmd.Flags().String("type-time", "", "GTC | DAY | SPECIFIED | SPECIFIED_DAY")
 }
 
-// ── position close/modify (writes; Phase 7) ──────────────────────────────────
+// ── position close / modify ──────────────────────────────────────────────────
 
 func newPositionCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "position", Short: "Operate on an open position by ticket"}
+
 	closeCmd := &cobra.Command{
 		Use:   "close <ticket>",
 		Short: "Close a position (DRY-RUN by default; safety hash required)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := safety.PrecheckWrite(cmd); err != nil {
-				return &ExitErr{Code: ExitSafetyRejected, Err: err}
+			ticket, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("ticket must be an integer: %w", err)}
 			}
-			return notImpl("Phase 7")
+			partial, _ := cmd.Flags().GetFloat64("partial")
+
+			ctx := writeCtx{cmd: cmd, opName: "position_close"}
+			b, db, acc, g, err := ctx.openAll()
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+
+			// Find the position so we know symbol, volume, side, current price.
+			positions, err := b.PositionsGet(nil)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			var pos *bridge.Position
+			for i := range positions {
+				if positions[i].Ticket == ticket {
+					pos = &positions[i]
+					break
+				}
+			}
+			if pos == nil {
+				return &ExitErr{Code: ExitNotFound, Err: fmt.Errorf("no open position with ticket %d", ticket)}
+			}
+			volume := pos.Volume
+			if partial > 0 && partial < 1 {
+				volume = roundLot(pos.Volume*partial, 2)
+				if volume == 0 {
+					return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("partial=%g rounds to 0 lots", partial)}
+				}
+			}
+			req := buildCloseRequest(pos, volume)
+			if err := safety.CheckGuardrails(g, volume); err != nil {
+				return ctx.reject(db, acc.Login, req, err)
+			}
+			return ctx.runOrderSend(b, db, acc, req)
 		},
 	}
-	closeCmd.Flags().Float64("partial", 0, "Close only this fraction of volume (0<x<1)")
+	closeCmd.Flags().Float64("partial", 0, "Close only this fraction of volume (0<x<1, rounded to 0.01 lots)")
 	safety.AddWriteFlags(closeCmd)
 	cmd.AddCommand(closeCmd)
 
@@ -520,10 +587,29 @@ func newPositionCmd() *cobra.Command {
 		Short: "Modify SL/TP on an open position (DRY-RUN by default; safety hash required)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := safety.PrecheckWrite(cmd); err != nil {
-				return &ExitErr{Code: ExitSafetyRejected, Err: err}
+			ticket, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("ticket must be an integer: %w", err)}
 			}
-			return notImpl("Phase 7")
+			sl, _ := cmd.Flags().GetFloat64("sl")
+			tp, _ := cmd.Flags().GetFloat64("tp")
+			if sl == 0 && tp == 0 {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("provide at least one of --sl or --tp")}
+			}
+			ctx := writeCtx{cmd: cmd, opName: "position_modify"}
+			b, db, acc, _, err := ctx.openAll()
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			req := map[string]any{
+				"action":   6, // TRADE_ACTION_SLTP
+				"position": ticket,
+				"sl":       sl,
+				"tp":       tp,
+			}
+			return ctx.runOrderSend(b, db, acc, req)
 		},
 	}
 	modify.Flags().Float64("sl", 0, "New stop loss")
@@ -534,20 +620,165 @@ func newPositionCmd() *cobra.Command {
 	return cmd
 }
 
+// ── close all --filter "<sql>" — the hero command's engine ──────────────────
+
 func newCloseAllCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "close", Short: "Bulk operations across positions"}
 	all := &cobra.Command{
 		Use:   "all",
 		Short: "Close every position matching --filter (SQL WHERE clause)",
+		Long: `Close every open position matching a SQL-style WHERE clause.
+
+Flow:
+  1. Snapshot live positions from the bridge into the positions table.
+  2. SELECT ticket, symbol, type, volume, profit FROM positions WHERE <filter>.
+  3. Print the resolved ticket list, total exposure, and a single hash that
+     covers the whole bulk close.
+  4. Exit 6 unless --confirm <hash> was passed.
+  5. On confirm: close each ticket sequentially; per-position retcode → audit
+     log. The bulk operation succeeds even if some closes fail; exit code is
+     5 (broker rejected) if any close was rejected, else 0.
+
+Examples:
+  pp-mt5 close all --filter "profit < -50"
+  pp-mt5 close all --filter "symbol like 'XAU%' AND magic = 0"
+  pp-mt5 close all --filter "1=1"      # everything (explicit on purpose)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := safety.PrecheckWrite(cmd); err != nil {
-				return &ExitErr{Code: ExitSafetyRejected, Err: err}
-			}
 			filter, _ := cmd.Flags().GetString("filter")
 			if filter == "" {
 				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--filter is required (use \"1=1\" for everything; explicit is the point)")}
 			}
-			return notImpl("Phase 7")
+			ctx := writeCtx{cmd: cmd, opName: "close_all"}
+			b, db, acc, g, err := ctx.openAll()
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+
+			// Step 1: snapshot positions into the mirror so the filter has data.
+			if _, err := store.SyncPositions(cmd.Context(), db, b, acc.Login); err != nil {
+				return mapBridgeErr(err)
+			}
+			// Step 2: resolve the filter to a ticket list.
+			rows, err := db.QueryContext(cmd.Context(),
+				"SELECT ticket, symbol, type, volume, profit FROM positions WHERE account_login=? AND ("+filter+")",
+				acc.Login)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("filter SQL: %w", err)}
+			}
+			defer rows.Close()
+			type target struct {
+				Ticket int64
+				Symbol string
+				Type   string
+				Volume float64
+				Profit float64
+			}
+			var targets []target
+			for rows.Next() {
+				var t target
+				if err := rows.Scan(&t.Ticket, &t.Symbol, &t.Type, &t.Volume, &t.Profit); err != nil {
+					return err
+				}
+				targets = append(targets, t)
+			}
+			// req: full payload (with live profit) for the audit log.
+			// intent: stable subset for the hash so a price tick between
+			// dry-run and confirm doesn't invalidate the user's hash.
+			req := map[string]any{
+				"op":      "close_all",
+				"filter":  filter,
+				"tickets": targets,
+			}
+			intentTickets := make([]map[string]any, len(targets))
+			for i, t := range targets {
+				intentTickets[i] = map[string]any{
+					"ticket": t.Ticket, "symbol": t.Symbol,
+					"type": t.Type, "volume": t.Volume,
+				}
+			}
+			intent := map[string]any{"op": "close_all", "filter": filter, "tickets": intentTickets}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "\nclose all candidates (filter: %s)\n", filter)
+			if len(targets) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "(no positions match — nothing to close)")
+				return nil
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "TICKET\tSYMBOL\tTYPE\tVOLUME\tCURRENT P&L")
+			fmt.Fprintln(tw, "──────\t──────\t────\t──────\t───────────")
+			var totalPnL float64
+			for _, t := range targets {
+				totalPnL += t.Profit
+				fmt.Fprintf(tw, "%d\t%s\t%s\t%g\t%+.2f\n", t.Ticket, t.Symbol, t.Type, t.Volume, t.Profit)
+			}
+			tw.Flush()
+			fmt.Fprintf(cmd.OutOrStdout(), "\nrealized P&L if closed now: %+.2f  (%d position%s)\n",
+				totalPnL, len(targets), pluralS(len(targets)))
+
+			if err := safety.PrecheckWrite(cmd, g, acc.TradeMode); err != nil {
+				return ctx.reject(db, acc.Login, req, err)
+			}
+			confirmed, err := safety.Confirmed(cmd, intent)
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				h := safety.CurrentHash(intent)
+				fmt.Fprintf(cmd.OutOrStdout(), "\nhash: %s  (60s window; covers tickets + filter, not live P&L)\n", h)
+				fmt.Fprintf(cmd.OutOrStdout(), "to execute:  pp-mt5 close all --filter %q --confirm %s%s\n",
+					filter, h, liveFlagsHint(acc.TradeMode))
+				ctx.auditDryRun(db, acc.Login, req, h)
+				return &ExitErr{Code: ExitSafetyRejected, Err: fmt.Errorf("dry-run — pass --confirm to execute")}
+			}
+
+			// Execute each close sequentially.
+			anyFailed := false
+			results := make([]map[string]any, 0, len(targets))
+			for _, t := range targets {
+				positions, _ := b.PositionsGet(map[string]any{"symbol": t.Symbol})
+				var pos *bridge.Position
+				for i := range positions {
+					if positions[i].Ticket == t.Ticket {
+						pos = &positions[i]
+						break
+					}
+				}
+				if pos == nil {
+					results = append(results, map[string]any{"ticket": t.Ticket, "error": "position vanished between filter and close"})
+					anyFailed = true
+					continue
+				}
+				closeReq := buildCloseRequest(pos, pos.Volume)
+				res, err := b.OrderSend(closeReq)
+				if err != nil {
+					results = append(results, map[string]any{"ticket": t.Ticket, "error": err.Error()})
+					anyFailed = true
+					continue
+				}
+				if !isOK(res.Retcode) {
+					anyFailed = true
+				}
+				results = append(results, map[string]any{
+					"ticket": t.Ticket, "retcode": res.Retcode, "comment": res.Comment,
+					"price": res.Price, "deal": res.Deal,
+				})
+			}
+			ctx.auditConfirmed(db, acc.Login, req, results)
+
+			tw2 := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw2, "\nTICKET\tRETCODE\tCOMMENT")
+			fmt.Fprintln(tw2, "──────\t───────\t───────")
+			for _, r := range results {
+				fmt.Fprintf(tw2, "%v\t%v\t%v\n", r["ticket"], r["retcode"], r["comment"])
+			}
+			tw2.Flush()
+
+			if anyFailed {
+				return &ExitErr{Code: ExitBrokerRejected, Err: fmt.Errorf("one or more closes failed")}
+			}
+			return nil
 		},
 	}
 	all.Flags().String("filter", "", "SQL WHERE clause against the positions table (required)")
@@ -555,6 +786,296 @@ func newCloseAllCmd() *cobra.Command {
 	cmd.AddCommand(all)
 	return cmd
 }
+
+// ── write-flow helpers ──────────────────────────────────────────────────────
+
+// writeCtx bundles the bridge/db/config plumbing every write command needs.
+// One per command invocation; no shared state across calls.
+type writeCtx struct {
+	cmd    *cobra.Command
+	opName string
+}
+
+func (w writeCtx) openAll() (*bridge.Bridge, *sql.DB, *bridge.AccountInfo, safety.Guardrails, error) {
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, nil, nil, safety.Guardrails{}, &ExitErr{Code: ExitConfig, Err: err}
+	}
+	g := safety.Guardrails{
+		MaxVolumePerOrder: cfg.Guardrails.MaxVolumePerOrder,
+		MaxOpenPositions:  cfg.Guardrails.MaxOpenPositions,
+		MaxDailyLoss:      cfg.Guardrails.MaxDailyLoss,
+		KillSwitchFile:    cfg.Guardrails.KillSwitchFile,
+	}
+	b, err := bridge.New(bridge.Options{Stderr: w.cmd.ErrOrStderr(), CallTimeout: 30 * time.Second})
+	if err != nil {
+		return nil, nil, nil, g, err
+	}
+	if err := b.Initialize(defaultInit(10000)); err != nil {
+		_ = b.Close()
+		return nil, nil, nil, g, mapBridgeErr(err)
+	}
+	acc, err := b.AccountInfo()
+	if err != nil {
+		_ = b.Close()
+		return nil, nil, nil, g, mapBridgeErr(err)
+	}
+	db, err := store.OpenAndMigrate("")
+	if err != nil {
+		_ = b.Close()
+		return nil, nil, nil, g, &ExitErr{Code: ExitConfig, Err: err}
+	}
+	return b, db, acc, g, nil
+}
+
+// runOrderSend runs the dry-run-or-execute flow for a single order_send.
+//
+// The HASH covers user intent (symbol/side/volume/sl/tp/magic/position) only —
+// not the live market price, which changes every tick and would invalidate
+// every confirm. The broker's deviation field absorbs price moves within the
+// 60-second window.
+func (w writeCtx) runOrderSend(b *bridge.Bridge, db *sql.DB, acc *bridge.AccountInfo, req map[string]any) error {
+	cfg, _ := config.Load("")
+	g := safety.Guardrails{
+		MaxVolumePerOrder: cfg.Guardrails.MaxVolumePerOrder,
+		KillSwitchFile:    cfg.Guardrails.KillSwitchFile,
+	}
+	if err := safety.PrecheckWrite(w.cmd, g, acc.TradeMode); err != nil {
+		return w.reject(db, acc.Login, req, err)
+	}
+
+	intent := hashableIntent(req)
+	confirmed, err := safety.Confirmed(w.cmd, intent)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		h := safety.CurrentHash(intent)
+		w.printDryRun(req)
+		fmt.Fprintf(w.cmd.OutOrStdout(), "hash: %s  (60s window; covers intent, not the live price)\n", h)
+		fmt.Fprintf(w.cmd.OutOrStdout(), "to execute: re-run with  --confirm %s%s\n", h, liveFlagsHint(acc.TradeMode))
+		w.auditDryRun(db, acc.Login, req, h)
+		return &ExitErr{Code: ExitSafetyRejected, Err: fmt.Errorf("dry-run — pass --confirm to execute")}
+	}
+
+	res, err := b.OrderSend(req)
+	if err != nil {
+		w.auditError(db, acc.Login, req, err)
+		return mapBridgeErr(err)
+	}
+	w.auditConfirmed(db, acc.Login, req, res)
+
+	if !isOK(res.Retcode) {
+		w.printOrderResult(res)
+		return &ExitErr{Code: ExitBrokerRejected, Err: fmt.Errorf("retcode %d: %s", res.Retcode, res.Comment)}
+	}
+	w.printOrderResult(res)
+	return nil
+}
+
+// hashableIntent strips fields that move with the market (price) so the hash
+// reflects user intent and survives small price ticks within the 60s window.
+// 'deviation' covers actual slippage at execution time.
+func hashableIntent(req map[string]any) map[string]any {
+	out := make(map[string]any, len(req))
+	for k, v := range req {
+		switch k {
+		case "price", "deviation":
+			// skip — these aren't user intent
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func (w writeCtx) printDryRun(req map[string]any) {
+	fmt.Fprintf(w.cmd.OutOrStdout(), "\nDRY-RUN: %s\n", w.opName)
+	keys := make([]string, 0, len(req))
+	for k := range req {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	tw := tabwriter.NewWriter(w.cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	for _, k := range keys {
+		fmt.Fprintf(tw, "%s\t%v\n", k, req[k])
+	}
+	tw.Flush()
+	fmt.Fprintln(w.cmd.OutOrStdout())
+}
+
+func (w writeCtx) printOrderResult(res *bridge.OrderSendResult) {
+	tw := tabwriter.NewWriter(w.cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "retcode\t%d (%s)\n", res.Retcode, retcodeName(res.Retcode))
+	fmt.Fprintf(tw, "comment\t%s\n", res.Comment)
+	fmt.Fprintf(tw, "deal\t%d\n", res.Deal)
+	fmt.Fprintf(tw, "order\t%d\n", res.Order)
+	fmt.Fprintf(tw, "price\t%g\n", res.Price)
+	fmt.Fprintf(tw, "volume\t%g\n", res.Volume)
+	tw.Flush()
+}
+
+func (w writeCtx) reject(db *sql.DB, accLogin int64, req map[string]any, why error) error {
+	buf, _ := json.Marshal(req)
+	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+		Command:      w.opName,
+		Request:      buf,
+		Confirmed:    false,
+		Error:        why.Error(),
+		AccountLogin: accLogin,
+		Mode:         modeStr(),
+	})
+	return &ExitErr{Code: ExitSafetyRejected, Err: why}
+}
+
+func (w writeCtx) auditDryRun(db *sql.DB, accLogin int64, req map[string]any, hash string) {
+	buf, _ := json.Marshal(req)
+	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+		Command:      w.opName,
+		Request:      buf,
+		Hash:         hash,
+		Confirmed:    false,
+		AccountLogin: accLogin,
+		Mode:         modeStr(),
+	})
+}
+
+func (w writeCtx) auditConfirmed(db *sql.DB, accLogin int64, req, res any) {
+	reqBuf, _ := json.Marshal(req)
+	resBuf, _ := json.Marshal(res)
+	hashSrc := req
+	if m, ok := req.(map[string]any); ok {
+		hashSrc = hashableIntent(m)
+	}
+	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+		Command:      w.opName,
+		Request:      reqBuf,
+		Hash:         safety.CurrentHash(hashSrc),
+		Confirmed:    true,
+		Response:     resBuf,
+		AccountLogin: accLogin,
+		Mode:         modeStr(),
+	})
+}
+
+func (w writeCtx) auditError(db *sql.DB, accLogin int64, req map[string]any, err error) {
+	buf, _ := json.Marshal(req)
+	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+		Command:      w.opName,
+		Request:      buf,
+		Hash:         safety.CurrentHash(hashableIntent(req)),
+		Confirmed:    true,
+		Error:        err.Error(),
+		AccountLogin: accLogin,
+		Mode:         modeStr(),
+	})
+}
+
+// Compile-time guard that hashableIntent stays compatible with auditDryRun
+// callers (which pass map[string]any directly).
+var _ = hashableIntent
+
+func modeStr() string {
+	if safety.CurrentMode() == safety.ModeLive {
+		return "live"
+	}
+	return "paper"
+}
+
+// ── request builders ────────────────────────────────────────────────────────
+
+// buildMarketRequest constructs a TRADE_ACTION_DEAL request for buy/sell.
+func buildMarketRequest(symbol string, action int, volume, price, sl, tp float64, magic int64, comment string, deviation int) map[string]any {
+	req := map[string]any{
+		"action":    1, // TRADE_ACTION_DEAL
+		"symbol":    symbol,
+		"volume":    volume,
+		"type":      action,
+		"price":     price,
+		"deviation": deviation,
+	}
+	if sl > 0 {
+		req["sl"] = sl
+	}
+	if tp > 0 {
+		req["tp"] = tp
+	}
+	if magic > 0 {
+		req["magic"] = magic
+	}
+	if comment != "" {
+		req["comment"] = comment
+	}
+	return req
+}
+
+// buildCloseRequest constructs the opposite-side TRADE_ACTION_DEAL request
+// that closes the position. MT5 needs the position ticket so it can match.
+func buildCloseRequest(p *bridge.Position, volume float64) map[string]any {
+	// buy position → sell deal, sell position → buy deal
+	closeType := 1 // sell
+	if p.Type == 1 {
+		closeType = 0 // buy
+	}
+	return map[string]any{
+		"action":    1, // TRADE_ACTION_DEAL
+		"symbol":    p.Symbol,
+		"volume":    volume,
+		"type":      closeType,
+		"position":  p.Ticket,
+		"price":     p.PriceCurrent,
+		"deviation": 20,
+	}
+}
+
+func isOK(retcode int) bool {
+	return retcode == 10008 || retcode == 10009 // TRADE_RETCODE_PLACED / DONE
+}
+
+func retcodeName(rc int) string {
+	switch rc {
+	case 10008:
+		return "PLACED"
+	case 10009:
+		return "DONE"
+	case 10004:
+		return "REQUOTE"
+	case 10013:
+		return "INVALID"
+	case 10014:
+		return "INVALID_VOLUME"
+	case 10015:
+		return "INVALID_PRICE"
+	case 10016:
+		return "INVALID_STOPS"
+	case 10017:
+		return "TRADE_DISABLED"
+	case 10018:
+		return "MARKET_CLOSED"
+	case 10019:
+		return "NO_MONEY"
+	case 10021:
+		return "PRICE_OFF"
+	case 10031:
+		return "CONNECTION"
+	}
+	return fmt.Sprintf("retcode_%d", rc)
+}
+
+func liveFlagsHint(tradeMode int) string {
+	if tradeMode == 2 {
+		return "  --i-understand-this-is-live  (and: $env:MT5_LIVE=\"1\" once per shell)"
+	}
+	return ""
+}
+
+// roundLot snaps a volume to the broker's lot step. For this CLI we approximate
+// with 2 decimal places, which matches every JustMarkets-style demo we've seen
+// and most retail brokers. A precise per-symbol round lives in Phase 9.
+func roundLot(v float64, _ int) float64 {
+	return math.Round(v*100) / 100
+}
+
 
 // ── risk preview ─────────────────────────────────────────────────────────────
 //

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func TestHashIsDeterministicWithinWindow(t *testing.T) {
@@ -51,15 +53,55 @@ func TestKillSwitchBlocks(t *testing.T) {
 	if err := os.WriteFile(f, []byte("stop"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	g := Guardrails{KillSwitchFile: f}
-	if err := CheckGuardrails(g, nil); err == nil {
+	cmd := dummyWriteCmd()
+	err := PrecheckWrite(cmd, Guardrails{KillSwitchFile: f}, 0)
+	if err == nil {
 		t.Fatal("kill switch present but writes allowed")
 	}
 }
 
-func TestKillSwitchAbsentAllows(t *testing.T) {
+func TestKillSwitchAbsentAllowsDemo(t *testing.T) {
+	cmd := dummyWriteCmd()
 	g := Guardrails{KillSwitchFile: filepath.Join(t.TempDir(), "definitely-absent")}
-	if err := CheckGuardrails(g, nil); err != nil {
-		t.Fatalf("absent kill switch should be permissive: %v", err)
+	if err := PrecheckWrite(cmd, g, 0); err != nil {
+		t.Fatalf("demo write should pass kill-switch + live gates: %v", err)
 	}
+}
+
+func TestRealAccountRequiresEnvAndFlag(t *testing.T) {
+	os.Unsetenv("MT5_LIVE")
+	cmd := dummyWriteCmd()
+	if err := PrecheckWrite(cmd, Guardrails{}, 2); err == nil {
+		t.Fatal("real account with no MT5_LIVE should be rejected")
+	}
+	t.Setenv("MT5_LIVE", "1")
+	if err := PrecheckWrite(cmd, Guardrails{}, 2); err == nil {
+		t.Fatal("real account with MT5_LIVE but no --i-understand-this-is-live should be rejected")
+	}
+	cmd.SetArgs([]string{"--i-understand-this-is-live"})
+	if err := cmd.ParseFlags([]string{"--i-understand-this-is-live"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrecheckWrite(cmd, Guardrails{}, 2); err != nil {
+		t.Fatalf("real account with both gates set should pass: %v", err)
+	}
+}
+
+func TestMaxVolumeGuardrail(t *testing.T) {
+	g := Guardrails{MaxVolumePerOrder: 1.0}
+	if err := CheckGuardrails(g, 0.5); err != nil {
+		t.Fatalf("0.5 under 1.0 should pass: %v", err)
+	}
+	if err := CheckGuardrails(g, 2.0); err == nil {
+		t.Fatal("2.0 over 1.0 should fail")
+	}
+	if err := CheckGuardrails(Guardrails{}, 1e6); err != nil {
+		t.Fatal("MaxVolumePerOrder=0 disables the limit")
+	}
+}
+
+func dummyWriteCmd() *cobra.Command {
+	c := &cobra.Command{Use: "test"}
+	AddWriteFlags(c)
+	return c
 }

@@ -130,6 +130,10 @@ See pp-mt5 doctor for any setup issue and pp-mt5 <command> --help per command.`,
 
 		// Phase 2 live event tail (stub today; documents the polling workaround)
 		newWatchCmd(),
+
+		// Phase 6 config tooling
+		newConfigInitCmd(),
+		newAuditCmd(),
 	)
 
 	return root

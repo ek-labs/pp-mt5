@@ -82,10 +82,27 @@ pp-mt5 sql "select symbol, sum(profit) p from deals group by symbol order by p"
 ### Hero: compound writes from a SQL predicate
 
 ```bash
-pp-mt5 close all --filter "profit < -500 and pips < -50"
+$ pp-mt5 close all --filter "profit < 0"
+
+close all candidates (filter: profit < 0)
+TICKET      SYMBOL    TYPE  VOLUME  CURRENT P&L
+──────      ──────    ────  ──────  ───────────
+2329038588  EURUSD.s  buy   0.01    -8.73
+
+realized P&L if closed now: -8.73  (1 position)
+
+hash: 9bf362c74fcee60a30dc6965942a5434304b9559248b5bb690d5148022297b54  (60s window; covers tickets + filter, not live P&L)
+to execute:  pp-mt5 close all --filter "profit < 0" --confirm 9bf362c74...
+
+# re-run with --confirm <hash>
+$ pp-mt5 close all --filter "profit < 0" --confirm 9bf362c74...
+
+TICKET      RETCODE  COMMENT
+──────      ───────  ───────
+2329038588  10009    Request executed
 ```
 
-Resolves to: fetch all open positions → filter in SQL → bulk close → audit. One dry-run hash. One `--confirm`. One audit row per ticket. **The `--filter` is your safety harness — it's explicit, version-controllable, and survives transcript replay.**
+Behind the scenes: snapshot live positions → SELECT WHERE filter → resolve ticket list → print candidates and projected P&L → SHA-256 of the **intent** (tickets + filter, not live profit) → exit 6 → on `--confirm` execute each close sequentially, audit per ticket. The `--filter` is your safety harness — explicit, version-controllable, survives transcript replay. The intent hash survives a few seconds of price ticks; the broker's deviation absorbs slippage at execution.
 
 ### Local SQLite mirror
 

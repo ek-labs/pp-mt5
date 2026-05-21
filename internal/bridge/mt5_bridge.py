@@ -274,11 +274,9 @@ def h_order_calc_profit(params: dict) -> Any:
     )
 def h_order_check(params: dict) -> Any: return _to_dict(mt5.order_check(params["request"]))
 def h_order_send(params: dict) -> Any:
-    res = mt5.order_send(params["request"])
-    d = _to_dict(res)
-    if d and d.get("retcode") not in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
-        raise BridgeError("BROKER_REJECTED", f"retcode={d.get('retcode')} comment={d.get('comment')}")
-    return d
+    # Always return the result — Go inspects retcode and decides exit code so
+    # we don't drop the broker's structured response on a rejection.
+    return _to_dict(mt5.order_send(params["request"]))
 
 
 def h_positions_total(params: dict) -> Any: return mt5.positions_total()

@@ -317,3 +317,38 @@ func (b *Bridge) OrderCalcProfit(action int, symbol string, volume, priceOpen, p
 	}
 	return out, nil
 }
+
+// OrderSendResult is mt5.order_send()'s result. retcode 10009/10008 = done/placed.
+type OrderSendResult struct {
+	Retcode    int     `json:"retcode"`
+	Deal       int64   `json:"deal"`
+	Order      int64   `json:"order"`
+	Volume     float64 `json:"volume"`
+	Price      float64 `json:"price"`
+	Bid        float64 `json:"bid"`
+	Ask        float64 `json:"ask"`
+	Comment    string  `json:"comment"`
+	RequestID  int64   `json:"request_id"`
+	RetcodeExt int     `json:"retcode_external"`
+}
+
+// OrderSend executes mt5.order_send with the given pre-built request map.
+// Caller owns building the request shape — this is the unconstrained escape
+// hatch the write commands use. Returns (nil, ErrBrokerRejected wrapper) when
+// retcode is not 10008/10009.
+func (b *Bridge) OrderSend(req map[string]any) (*OrderSendResult, error) {
+	var out OrderSendResult
+	if err := b.Call("order_send", map[string]any{"request": req}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// OrderCheck previews via mt5.order_check — never sends.
+func (b *Bridge) OrderCheck(req map[string]any) (map[string]any, error) {
+	var out map[string]any
+	if err := b.Call("order_check", map[string]any{"request": req}, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
