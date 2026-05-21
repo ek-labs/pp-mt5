@@ -1,25 +1,36 @@
-// Package store opens the local SQLite mirror and runs migrations from
-// library/trading/mt5/migrations/. The mirror is the source of truth for
-// stats, replay, backtest, and `pp-mt5 sql`; the bridge fills it via sync.
+// Package store opens the local SQLite mirror and runs migrations.
+// The mirror is the source of truth for stats, replay, backtest, and
+// `pp-mt5 sql`; the bridge fills it via sync.
 //
-// Path: $XDG_DATA_HOME/mt5-pp-cli/store.db, falling back to:
+// Path resolution (first hit wins):
 //
+//	$MT5_PP_STORE
+//	$XDG_DATA_HOME/mt5-pp-cli/store.db
 //	Windows: %LOCALAPPDATA%\mt5-pp-cli\store.db
 //	Mac:     ~/Library/Application Support/mt5-pp-cli/store.db
 //	Linux:   ~/.local/share/mt5-pp-cli/store.db
 //
-// SQLite driver is modernc.org/sqlite — pure Go, no cgo dependency.
+// SQLite driver is modernc.org/sqlite — pure Go, no cgo.
 package store
 
 import (
+	"context"
 	"database/sql"
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
+
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 // DefaultPath returns the platform-specific path to the store database.
 func DefaultPath() string {
@@ -43,8 +54,13 @@ func DefaultPath() string {
 	}
 }
 
-// Open returns a connection to the store, creating the parent directory and
-// running pending migrations on first call. Idempotent.
+// AuditPath returns where audit.jsonl lives (sibling of store.db).
+func AuditPath() string {
+	return filepath.Join(filepath.Dir(DefaultPath()), "audit.jsonl")
+}
+
+// Open returns a connection to the store, creating the parent directory.
+// Use OpenAndMigrate if you also want to apply pending migrations.
 func Open(path string) (*sql.DB, error) {
 	if path == "" {
 		path = DefaultPath()
@@ -60,7 +76,111 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// AuditPath returns where audit.jsonl lives (sibling of store.db).
-func AuditPath() string {
-	return filepath.Join(filepath.Dir(DefaultPath()), "audit.jsonl")
+// OpenAndMigrate opens the store and applies any pending migrations from the
+// embedded migrations directory. Idempotent.
+func OpenAndMigrate(path string) (*sql.DB, error) {
+	db, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := Migrate(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// Migrate applies every migration in the embedded migrations directory whose
+// integer version is greater than the highest currently recorded in
+// schema_migrations. Each migration runs in its own transaction (the SQL file
+// itself may contain BEGIN/COMMIT — that's fine; we use Exec, not a separate
+// driver tx).
+func Migrate(ctx context.Context, db *sql.DB) error {
+	files, err := listMigrations()
+	if err != nil {
+		return err
+	}
+
+	// Bootstrap schema_migrations if it doesn't exist yet. We can't query for
+	// applied versions until the table exists.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version    INTEGER PRIMARY KEY,
+		applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+	)`); err != nil {
+		return fmt.Errorf("bootstrap schema_migrations: %w", err)
+	}
+
+	applied, err := appliedVersions(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	for _, m := range files {
+		if applied[m.Version] {
+			continue
+		}
+		body, err := fs.ReadFile(migrationsFS, m.path)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", m.Name, err)
+		}
+		if _, err := db.ExecContext(ctx, string(body)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", m.Name, err)
+		}
+		// The migration itself inserts into schema_migrations; double-check.
+		var seen int
+		if err := db.QueryRowContext(ctx, "SELECT 1 FROM schema_migrations WHERE version=?", m.Version).Scan(&seen); err == sql.ErrNoRows {
+			if _, err := db.ExecContext(ctx, "INSERT INTO schema_migrations(version) VALUES (?)", m.Version); err != nil {
+				return fmt.Errorf("record migration %s: %w", m.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+type migration struct {
+	Version int
+	Name    string
+	path    string
+}
+
+func listMigrations() ([]migration, error) {
+	entries, err := fs.ReadDir(migrationsFS, "migrations")
+	if err != nil {
+		return nil, fmt.Errorf("list migrations: %w", err)
+	}
+	out := make([]migration, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		// Filename convention: NNNN_name.sql
+		prefix, _, ok := strings.Cut(e.Name(), "_")
+		if !ok {
+			return nil, fmt.Errorf("migration %s: missing NNNN_ prefix", e.Name())
+		}
+		ver, err := strconv.Atoi(prefix)
+		if err != nil {
+			return nil, fmt.Errorf("migration %s: bad version prefix: %w", e.Name(), err)
+		}
+		out = append(out, migration{Version: ver, Name: e.Name(), path: "migrations/" + e.Name()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	return out, nil
+}
+
+func appliedVersions(ctx context.Context, db *sql.DB) (map[int]bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT version FROM schema_migrations")
+	if err != nil {
+		return nil, fmt.Errorf("query schema_migrations: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int]bool)
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out[v] = true
+	}
+	return out, rows.Err()
 }

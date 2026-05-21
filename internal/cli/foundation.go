@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -451,7 +455,7 @@ func printTerminal(w io.Writer, v any) {
 	tw.Flush()
 }
 
-// ── sync / sql (still phase 2; keep stubs identical to scaffold) ─────────────
+// ── sync ────────────────────────────────────────────────────────────────────
 
 func newSyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -460,49 +464,508 @@ func newSyncCmd() *cobra.Command {
 		Long: `Pull symbols, bars, ticks, orders, deals, and positions into the local SQLite store.
 
 The mirror is the source of truth for stats, replay, backtest, and sql. First
-sync of a large account can take minutes; subsequent runs are incremental.`,
+sync of a large account can take minutes; subsequent runs are incremental
+(every sync uses upsert semantics).`,
 	}
-	var since string
-	syncAll := &cobra.Command{
-		Use:   "all",
-		Short: "Bulk pull every symbol's bars + ticks + every order/deal since --since",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			_ = since
-			return notImpl("Phase 2")
-		},
-	}
-	syncAll.Flags().StringVar(&since, "since", "2020-01-01", "ISO date (YYYY-MM-DD) or relative (30d, 2y)")
-	syncAll.Flags().Bool("no-ticks", false, "Skip tick history (orders of magnitude faster)")
-	syncAll.Flags().StringSlice("only-symbols", nil, "Restrict sync to these symbols (comma-separated)")
-	cmd.AddCommand(syncAll)
-
-	for _, sub := range []struct{ use, short, phase string }{
-		{"symbols", "Sync the symbols table only", "Phase 2"},
-		{"bars --symbol EURUSD --tf M5", "Sync bars for one symbol+timeframe", "Phase 2"},
-		{"ticks --symbol EURUSD", "Sync ticks for one symbol", "Phase 2"},
-		{"deals", "Sync historical deals only", "Phase 2"},
-		{"orders", "Sync historical orders only", "Phase 2"},
-		{"positions", "Snapshot current open positions", "Phase 2"},
-	} {
-		s := sub
-		cmd.AddCommand(&cobra.Command{
-			Use:   s.use,
-			Short: s.short,
-			RunE:  func(cmd *cobra.Command, args []string) error { return notImpl(s.phase) },
-		})
-	}
+	cmd.AddCommand(newSyncAllCmd())
+	cmd.AddCommand(newSyncSymbolsCmd())
+	cmd.AddCommand(newSyncPositionsCmd())
+	cmd.AddCommand(newSyncOrdersCmd())
+	cmd.AddCommand(newSyncDealsCmd())
+	cmd.AddCommand(newSyncHistoryOrdersCmd())
+	cmd.AddCommand(newSyncBarsCmd())
+	cmd.AddCommand(newSyncTicksCmd())
 	return cmd
 }
 
+func newSyncAllCmd() *cobra.Command {
+	var (
+		since       string
+		withBars    bool
+		withTicks   bool
+		barsTFs     []string
+		onlySymbols []string
+	)
+	cmd := &cobra.Command{
+		Use:   "all",
+		Short: "symbols + positions + orders + history (deals+orders) since --since; optionally bars/ticks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			from, err := parseSince(since)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: err}
+			}
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+
+			verbose := func(format string, args ...any) {}
+			if v, _ := cmd.Flags().GetBool("verbose"); v {
+				verbose = func(format string, args ...any) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "  "+format+"\n", args...)
+				}
+			}
+			counts, err := store.SyncAll(cmd.Context(), db, b, store.AllOptions{
+				AccountLogin: acc.Login,
+				Since:        from,
+				OnlySymbols:  onlySymbols,
+				IncludeBars:  withBars,
+				IncludeTicks: withTicks,
+				BarsTFs:      barsTFs,
+				Verbose:      verbose,
+			})
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, counts, printSyncCounts)
+		},
+	}
+	cmd.Flags().StringVar(&since, "since", "30d", "ISO date (YYYY-MM-DD) or relative (30d, 2y)")
+	cmd.Flags().BoolVar(&withBars, "bars", false, "Also sync bars (loops per --only-symbols × --bars-tf; slow without filters)")
+	cmd.Flags().BoolVar(&withTicks, "ticks", false, "Also sync ticks (huge — use with --only-symbols)")
+	cmd.Flags().StringSliceVar(&barsTFs, "bars-tf", []string{"M5", "H1", "D1"}, "Timeframes for --bars")
+	cmd.Flags().StringSliceVar(&onlySymbols, "only-symbols", nil, "Restrict bars/ticks to these symbols")
+	return cmd
+}
+
+func newSyncSymbolsCmd() *cobra.Command {
+	var group string
+	cmd := &cobra.Command{
+		Use:   "symbols",
+		Short: "Sync the symbols table only",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			c, err := store.SyncSymbols(cmd.Context(), db, b, acc.Login, group)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, map[string]store.Counts{"symbols": c}, printSyncCounts)
+		},
+	}
+	cmd.Flags().StringVar(&group, "group", "", "MT5 group filter (e.g. \"EUR*\")")
+	return cmd
+}
+
+func newSyncPositionsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "positions",
+		Short: "Snapshot current open positions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			c, err := store.SyncPositions(cmd.Context(), db, b, acc.Login)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, map[string]store.Counts{"positions": c}, printSyncCounts)
+		},
+	}
+}
+
+func newSyncOrdersCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "orders",
+		Short: "Snapshot active (pending) orders",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			c, err := store.SyncOrders(cmd.Context(), db, b, acc.Login)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, map[string]store.Counts{"orders": c}, printSyncCounts)
+		},
+	}
+}
+
+func newSyncDealsCmd() *cobra.Command {
+	var from, to string
+	cmd := &cobra.Command{
+		Use:   "deals",
+		Short: "Sync historical deals between --from and --to",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromT, toT, err := parseRange(from, to)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: err}
+			}
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			c, err := store.SyncDeals(cmd.Context(), db, b, acc.Login, fromT, toT)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, map[string]store.Counts{"deals": c}, printSyncCounts)
+		},
+	}
+	cmd.Flags().StringVar(&from, "from", "30d", "ISO date or relative")
+	cmd.Flags().StringVar(&to, "to", "now", "ISO date or relative")
+	return cmd
+}
+
+func newSyncHistoryOrdersCmd() *cobra.Command {
+	var from, to string
+	cmd := &cobra.Command{
+		Use:   "history-orders",
+		Short: "Sync historical orders between --from and --to",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromT, toT, err := parseRange(from, to)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: err}
+			}
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			c, err := store.SyncHistoryOrders(cmd.Context(), db, b, acc.Login, fromT, toT)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, map[string]store.Counts{"history_orders": c}, printSyncCounts)
+		},
+	}
+	cmd.Flags().StringVar(&from, "from", "30d", "ISO date or relative")
+	cmd.Flags().StringVar(&to, "to", "now", "ISO date or relative")
+	return cmd
+}
+
+func newSyncBarsCmd() *cobra.Command {
+	var (
+		symbol, tf, from, to string
+	)
+	cmd := &cobra.Command{
+		Use:   "bars",
+		Short: "Sync bars for one symbol+timeframe (--symbol --tf --from --to)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if symbol == "" {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--symbol is required")}
+			}
+			fromT, toT, err := parseRange(from, to)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: err}
+			}
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			c, err := store.SyncBars(cmd.Context(), db, b, acc.Login, symbol, tf, fromT, toT)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, map[string]store.Counts{fmt.Sprintf("bars_%s_%s", symbol, tf): c}, printSyncCounts)
+		},
+	}
+	cmd.Flags().StringVar(&symbol, "symbol", "", "Symbol (required)")
+	cmd.Flags().StringVar(&tf, "tf", "H1", "Timeframe: M1 M5 M15 M30 H1 H4 D1 W1 MN1")
+	cmd.Flags().StringVar(&from, "from", "30d", "ISO date or relative")
+	cmd.Flags().StringVar(&to, "to", "now", "ISO date or relative")
+	return cmd
+}
+
+func newSyncTicksCmd() *cobra.Command {
+	var symbol, from, to string
+	cmd := &cobra.Command{
+		Use:   "ticks",
+		Short: "Sync ticks for one symbol (--symbol --from --to)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if symbol == "" {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--symbol is required")}
+			}
+			fromT, toT, err := parseRange(from, to)
+			if err != nil {
+				return &ExitErr{Code: ExitUsage, Err: err}
+			}
+			b, db, acc, err := openBridgeAndStore(cmd)
+			if err != nil {
+				return err
+			}
+			defer b.Close()
+			defer db.Close()
+			c, err := store.SyncTicks(cmd.Context(), db, b, acc.Login, symbol, fromT, toT)
+			if err != nil {
+				return mapBridgeErr(err)
+			}
+			return emit(cmd, map[string]store.Counts{"ticks_" + symbol: c}, printSyncCounts)
+		},
+	}
+	cmd.Flags().StringVar(&symbol, "symbol", "", "Symbol (required)")
+	cmd.Flags().StringVar(&from, "from", "1d", "ISO date/time or relative (ticks are huge — keep this narrow)")
+	cmd.Flags().StringVar(&to, "to", "now", "ISO date/time or relative")
+	return cmd
+}
+
+// ── sql ─────────────────────────────────────────────────────────────────────
+
 func newSQLCmd() *cobra.Command {
+	var allowWrite bool
 	cmd := &cobra.Command{
 		Use:   "sql \"<query>\"",
-		Short: "Run an arbitrary SQL query against the local mirror",
-		Args:  cobra.ExactArgs(1),
-		RunE:  func(cmd *cobra.Command, args []string) error { return notImpl("Phase 2") },
+		Short: "Run an SQL query against the local mirror",
+		Long: `Execute a read-only or write SQL statement against the local store.
+
+Tables:
+  schema_migrations, accounts, symbols, ticks,
+  bars_M1, bars_M5, bars_M15, bars_M30, bars_H1, bars_H4,
+  bars_D1, bars_W1, bars_MN1,
+  orders, history_orders, positions, deals,
+  calendar_events, features, backtests, audit.
+
+Read-only by default — INSERT/UPDATE/DELETE/DROP/ALTER require --write.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			query := args[0]
+			if !allowWrite && looksLikeWrite(query) {
+				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("query looks like a write — re-run with --write to allow it")}
+			}
+			db, err := store.OpenAndMigrate("")
+			if err != nil {
+				return &ExitErr{Code: ExitConfig, Err: err}
+			}
+			defer db.Close()
+			return runSQL(cmd, db, query)
+		},
 	}
-	cmd.Flags().Bool("write", false, "Allow INSERT/UPDATE/DELETE statements")
+	cmd.Flags().BoolVar(&allowWrite, "write", false, "Allow INSERT/UPDATE/DELETE/DROP/ALTER statements")
 	return cmd
+}
+
+// ── shared helpers for sync/sql ─────────────────────────────────────────────
+
+// openBridgeAndStore is the boilerplate every sync subcommand needs.
+// Returns a connected bridge, an opened+migrated DB, and the current account
+// (so we know which account_login to tag rows with).
+func openBridgeAndStore(cmd *cobra.Command) (*bridge.Bridge, *sql.DB, *bridge.AccountInfo, error) {
+	b, err := bridge.New(bridge.Options{Stderr: cmd.ErrOrStderr(), CallTimeout: 60 * time.Second})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := b.Initialize(defaultInit(10000)); err != nil {
+		_ = b.Close()
+		return nil, nil, nil, mapBridgeErr(err)
+	}
+	acc, err := b.AccountInfo()
+	if err != nil {
+		_ = b.Close()
+		return nil, nil, nil, mapBridgeErr(err)
+	}
+	db, err := store.OpenAndMigrate("")
+	if err != nil {
+		_ = b.Close()
+		return nil, nil, nil, &ExitErr{Code: ExitConfig, Err: err}
+	}
+	// Also stamp the accounts table so SQL queries can join freely.
+	_, _ = db.ExecContext(cmd.Context(), `INSERT INTO accounts(
+		login, server, name, company, currency, leverage, trade_mode, last_synced
+	) VALUES (?,?,?,?,?,?,?,?)
+	ON CONFLICT(login) DO UPDATE SET
+		server=excluded.server, name=excluded.name, company=excluded.company,
+		currency=excluded.currency, leverage=excluded.leverage,
+		trade_mode=excluded.trade_mode, last_synced=excluded.last_synced`,
+		acc.Login, acc.Server, acc.Name, acc.Company, acc.Currency, acc.Leverage,
+		acc.TradeModeName(), time.Now().UnixMilli())
+	return b, db, acc, nil
+}
+
+func parseSince(s string) (time.Time, error) {
+	t, _, err := parseRangeOne(s, time.Now())
+	return t, err
+}
+
+func parseRange(from, to string) (time.Time, time.Time, error) {
+	now := time.Now()
+	toT, _, err := parseRangeOne(to, now)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--to: %w", err)
+	}
+	fromT, _, err := parseRangeOne(from, toT)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--from: %w", err)
+	}
+	return fromT, toT, nil
+}
+
+// parseRangeOne accepts:
+//   - "now" / "today" → now / now (truncated to day)
+//   - ISO date "YYYY-MM-DD"
+//   - ISO datetime "YYYY-MM-DD HH:MM:SS"
+//   - relative "<int><unit>" with unit ∈ {m,h,d,w,y} (m = minutes, not months)
+//
+// The second return value is a "specified day" flag (true if YYYY-MM-DD form).
+func parseRangeOne(s string, anchor time.Time) (time.Time, bool, error) {
+	s = strings.TrimSpace(s)
+	switch s {
+	case "now":
+		return anchor, false, nil
+	case "today":
+		return time.Date(anchor.Year(), anchor.Month(), anchor.Day(), 0, 0, 0, 0, anchor.Location()), true, nil
+	}
+	for _, fmt2 := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(fmt2, s); err == nil {
+			return t, fmt2 == "2006-01-02", nil
+		}
+	}
+	if d, err := parseRelativeDuration(s); err == nil {
+		return anchor.Add(-d), false, nil
+	}
+	return time.Time{}, false, fmt.Errorf("unparseable date %q (try 2024-01-01, 30d, 2y)", s)
+}
+
+func parseRelativeDuration(s string) (time.Duration, error) {
+	if len(s) < 2 {
+		return 0, fmt.Errorf("too short")
+	}
+	unit := s[len(s)-1]
+	n, err := strconv.Atoi(s[:len(s)-1])
+	if err != nil {
+		return 0, err
+	}
+	switch unit {
+	case 'm':
+		return time.Duration(n) * time.Minute, nil
+	case 'h':
+		return time.Duration(n) * time.Hour, nil
+	case 'd':
+		return time.Duration(n) * 24 * time.Hour, nil
+	case 'w':
+		return time.Duration(n) * 7 * 24 * time.Hour, nil
+	case 'y':
+		return time.Duration(n) * 365 * 24 * time.Hour, nil
+	}
+	return 0, fmt.Errorf("unknown unit %q", unit)
+}
+
+func looksLikeWrite(q string) bool {
+	first := strings.ToUpper(strings.TrimSpace(q))
+	for _, kw := range []string{"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE", "TRUNCATE", "PRAGMA"} {
+		if strings.HasPrefix(first, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func runSQL(cmd *cobra.Command, db *sql.DB, query string) error {
+	if looksLikeWrite(query) {
+		res, err := db.ExecContext(cmd.Context(), query)
+		if err != nil {
+			return &ExitErr{Code: ExitConfig, Err: err}
+		}
+		n, _ := res.RowsAffected()
+		fmt.Fprintf(cmd.OutOrStdout(), "ok: %d row(s) affected\n", n)
+		return nil
+	}
+	rows, err := db.QueryContext(cmd.Context(), query)
+	if err != nil {
+		return &ExitErr{Code: ExitConfig, Err: err}
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+
+	var all []map[string]any
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		r := map[string]any{}
+		for i, c := range cols {
+			r[c] = normalizeSQLValue(vals[i])
+		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if jsonFlag(cmd) {
+		return emit(cmd, all, nil)
+	}
+	printSQLTable(cmd.OutOrStdout(), cols, all)
+	return nil
+}
+
+func normalizeSQLValue(v any) any {
+	switch x := v.(type) {
+	case []byte:
+		return string(x)
+	default:
+		return x
+	}
+}
+
+func printSQLTable(w io.Writer, cols []string, rows []map[string]any) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, strings.Join(cols, "\t"))
+	sep := make([]string, len(cols))
+	for i := range sep {
+		sep[i] = strings.Repeat("─", len(cols[i]))
+	}
+	fmt.Fprintln(tw, strings.Join(sep, "\t"))
+	for _, r := range rows {
+		parts := make([]string, len(cols))
+		for i, c := range cols {
+			parts[i] = fmt.Sprintf("%v", r[c])
+		}
+		fmt.Fprintln(tw, strings.Join(parts, "\t"))
+	}
+	tw.Flush()
+	fmt.Fprintf(w, "\n(%d row%s)\n", len(rows), pluralS(len(rows)))
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func printSyncCounts(w io.Writer, v any) {
+	counts := v.(map[string]store.Counts)
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "RESOURCE\tROWS")
+	fmt.Fprintln(tw, "────────\t────")
+	total := 0
+	for _, k := range keys {
+		c := counts[k]
+		total += c.Inserted
+		fmt.Fprintf(tw, "%s\t%d\n", k, c.Inserted)
+	}
+	tw.Flush()
+	fmt.Fprintf(w, "\nTotal rows synced: %d\n", total)
 }
 
 // ── shared helpers ───────────────────────────────────────────────────────────

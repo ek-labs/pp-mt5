@@ -67,14 +67,38 @@ class BridgeError(Exception):
 
 
 def _to_dict(obj: Any) -> Any:
-    """Convert a MetaTrader5 named-tuple result into a plain dict."""
+    """Convert any MetaTrader5 result (named tuple, tuple of named tuples,
+    numpy structured array, numpy scalar) into a JSON-serializable form."""
     if obj is None:
         return None
+    # numpy: copy_rates_* and copy_ticks_* return structured ndarrays.
+    try:
+        import numpy as np  # local import: bridge runs without numpy too
+        if isinstance(obj, np.ndarray):
+            if obj.dtype.names:
+                names = obj.dtype.names
+                return [dict(zip(names, [_scalar(v) for v in row])) for row in obj.tolist()]
+            return [_scalar(v) for v in obj.tolist()]
+        if isinstance(obj, np.generic):
+            return obj.item()
+    except ImportError:
+        pass
     if hasattr(obj, "_asdict"):
-        return obj._asdict()
+        return {k: _scalar(v) for k, v in obj._asdict().items()}
     if isinstance(obj, (list, tuple)):
         return [_to_dict(x) for x in obj]
     return obj
+
+
+def _scalar(v: Any) -> Any:
+    """Coerce numpy scalar types to Python natives."""
+    try:
+        import numpy as np
+        if isinstance(v, np.generic):
+            return v.item()
+    except ImportError:
+        pass
+    return v
 
 
 def h_initialize(params: dict) -> Any:
@@ -132,12 +156,93 @@ def h_market_book_get(params: dict) -> Any: return _to_dict(mt5.market_book_get(
 def h_market_book_release(params: dict) -> Any: return {"ok": mt5.market_book_release(params["symbol"])}
 
 
-# Bars + ticks
-def h_copy_rates_from(params: dict) -> Any: return _to_dict(mt5.copy_rates_from(**params))
-def h_copy_rates_from_pos(params: dict) -> Any: return _to_dict(mt5.copy_rates_from_pos(**params))
-def h_copy_rates_range(params: dict) -> Any: return _to_dict(mt5.copy_rates_range(**params))
-def h_copy_ticks_from(params: dict) -> Any: return _to_dict(mt5.copy_ticks_from(**params))
-def h_copy_ticks_range(params: dict) -> Any: return _to_dict(mt5.copy_ticks_range(**params))
+# Bars + ticks — normalize timeframe strings ("M5") and unix-int dates to MT5 types.
+
+TF_MAP = {
+    "M1":  "TIMEFRAME_M1",  "M2":  "TIMEFRAME_M2",  "M3":  "TIMEFRAME_M3",
+    "M4":  "TIMEFRAME_M4",  "M5":  "TIMEFRAME_M5",  "M6":  "TIMEFRAME_M6",
+    "M10": "TIMEFRAME_M10", "M12": "TIMEFRAME_M12", "M15": "TIMEFRAME_M15",
+    "M20": "TIMEFRAME_M20", "M30": "TIMEFRAME_M30",
+    "H1": "TIMEFRAME_H1", "H2": "TIMEFRAME_H2", "H3": "TIMEFRAME_H3",
+    "H4": "TIMEFRAME_H4", "H6": "TIMEFRAME_H6", "H8": "TIMEFRAME_H8",
+    "H12": "TIMEFRAME_H12",
+    "D1": "TIMEFRAME_D1", "W1": "TIMEFRAME_W1", "MN1": "TIMEFRAME_MN1",
+}
+
+def _tf(v):
+    if isinstance(v, str):
+        name = TF_MAP.get(v.upper())
+        if name is None:
+            raise BridgeError("INVALID_PARAMS", f"unknown timeframe {v!r}")
+        return getattr(mt5, name)
+    return v
+
+def _dt(v):
+    """Accept unix seconds (int/float) or ISO string. Return datetime."""
+    import datetime as _dt
+    if isinstance(v, (int, float)):
+        return _dt.datetime.fromtimestamp(float(v), _dt.timezone.utc)
+    if isinstance(v, str):
+        # support both 'YYYY-MM-DD' and 'YYYY-MM-DD HH:MM:SS'
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return _dt.datetime.strptime(v, fmt)
+            except ValueError:
+                continue
+        raise BridgeError("INVALID_PARAMS", f"unparseable date {v!r}")
+    return v
+
+def _bars_params(p):
+    p = dict(p)
+    if "timeframe" in p: p["timeframe"] = _tf(p["timeframe"])
+    if "date_from" in p: p["date_from"] = _dt(p["date_from"])
+    if "date_to"   in p: p["date_to"]   = _dt(p["date_to"])
+    return p
+
+def _ticks_params(p):
+    p = dict(p)
+    if "date_from" in p: p["date_from"] = _dt(p["date_from"])
+    if "date_to"   in p: p["date_to"]   = _dt(p["date_to"])
+    if "flags"     in p and isinstance(p["flags"], str):
+        # accept "all" | "info" | "trade" shortcuts
+        m = {"all": mt5.COPY_TICKS_ALL, "info": mt5.COPY_TICKS_INFO, "trade": mt5.COPY_TICKS_TRADE}
+        p["flags"] = m.get(p["flags"].lower(), p["flags"])
+    return p
+
+# MT5's C bindings are positional-only for the bars/ticks copy family.
+# We accept named params on the wire and unpack in the documented order.
+
+def _ensure_selected(symbol: str) -> None:
+    """copy_rates_range / copy_ticks_range return nothing for unselected
+    symbols. We Select-on-the-fly; harmless if the symbol is already shown."""
+    if not mt5.symbol_select(symbol, True):
+        err = mt5.last_error()
+        raise BridgeError("INVALID_PARAMS", f"symbol_select({symbol}) failed: {err}")
+
+def h_copy_rates_from(params: dict) -> Any:
+    p = _bars_params(params)
+    _ensure_selected(p["symbol"])
+    return _to_dict(mt5.copy_rates_from(p["symbol"], p["timeframe"], p["date_from"], p.get("count", 0)))
+
+def h_copy_rates_from_pos(params: dict) -> Any:
+    p = _bars_params(params)
+    _ensure_selected(p["symbol"])
+    return _to_dict(mt5.copy_rates_from_pos(p["symbol"], p["timeframe"], p.get("start_pos", 0), p.get("count", 0)))
+
+def h_copy_rates_range(params: dict) -> Any:
+    p = _bars_params(params)
+    _ensure_selected(p["symbol"])
+    return _to_dict(mt5.copy_rates_range(p["symbol"], p["timeframe"], p["date_from"], p["date_to"]))
+
+def h_copy_ticks_from(params: dict) -> Any:
+    p = _ticks_params(params)
+    _ensure_selected(p["symbol"])
+    return _to_dict(mt5.copy_ticks_from(p["symbol"], p["date_from"], p.get("count", 0), p.get("flags", mt5.COPY_TICKS_ALL)))
+
+def h_copy_ticks_range(params: dict) -> Any:
+    p = _ticks_params(params)
+    _ensure_selected(p["symbol"])
+    return _to_dict(mt5.copy_ticks_range(p["symbol"], p["date_from"], p["date_to"], p.get("flags", mt5.COPY_TICKS_ALL)))
 
 
 # Orders / positions / history
@@ -156,10 +261,35 @@ def h_order_send(params: dict) -> Any:
 
 def h_positions_total(params: dict) -> Any: return mt5.positions_total()
 def h_positions_get(params: dict) -> Any: return _to_dict(mt5.positions_get(**params))
-def h_history_orders_total(params: dict) -> Any: return mt5.history_orders_total(**params)
-def h_history_orders_get(params: dict) -> Any: return _to_dict(mt5.history_orders_get(**params))
-def h_history_deals_total(params: dict) -> Any: return mt5.history_deals_total(**params)
-def h_history_deals_get(params: dict) -> Any: return _to_dict(mt5.history_deals_get(**params))
+def _history_params(p):
+    p = dict(p)
+    if "date_from" in p: p["date_from"] = _dt(p["date_from"])
+    if "date_to"   in p: p["date_to"]   = _dt(p["date_to"])
+    return p
+
+# history_* are positional (date_from, date_to) plus optional group/ticket/position kwargs.
+# We pass date_from/date_to positionally and any remaining keys as kwargs.
+
+def _history_args(params: dict):
+    p = _history_params(params)
+    dfrom, dto = p.pop("date_from", None), p.pop("date_to", None)
+    return dfrom, dto, p
+
+def h_history_orders_total(params: dict) -> Any:
+    dfrom, dto, rest = _history_args(params)
+    return mt5.history_orders_total(dfrom, dto, **rest)
+
+def h_history_orders_get(params: dict) -> Any:
+    dfrom, dto, rest = _history_args(params)
+    return _to_dict(mt5.history_orders_get(dfrom, dto, **rest))
+
+def h_history_deals_total(params: dict) -> Any:
+    dfrom, dto, rest = _history_args(params)
+    return mt5.history_deals_total(dfrom, dto, **rest)
+
+def h_history_deals_get(params: dict) -> Any:
+    dfrom, dto, rest = _history_args(params)
+    return _to_dict(mt5.history_deals_get(dfrom, dto, **rest))
 
 
 HANDLERS: Dict[str, Callable[[dict], Any]] = {

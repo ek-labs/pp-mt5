@@ -14,7 +14,7 @@ The CLI is being built in 11 phases per the design spec. This file tracks where 
 |---|---------------------------------------------|--------|-------|
 | 0 | Scaffold (go.mod, command tree, README, schema, manifest, skill, MCP stub, helper TODO) | ✅ | Builds + `go vet` clean. Safety hash/window/kill-switch unit-tested. |
 | 1 | Python bridge real implementation; `doctor`, `connect login`, `account info`, `terminal info`, `connect status`, `connect logout` | ✅ | Go-side `bridge.Bridge` spawns Python via embedded `mt5_bridge.py` (`go:embed`), line-delimited JSON-RPC, per-call timeout, sentinel-error mapping. Typed wrappers for `Initialize/Login/Shutdown/AccountInfo/TerminalInfo/Version`. `doctor` runs 7 checks, each with structured remediation. `account info`/`terminal info`/`connect status` print human tables or JSON depending on `--json/--agent/--human-friendly`/TTY detection. End-to-end smoke tested against a JustMarkets demo account. |
-| 2 | SQLite store: open, run migrations, `sync all`, `sql` | ⬜ | `migrations/0001_init.sql` is complete; store.Open() is implemented; needs migrations runner and sync orchestration. |
+| 2 | SQLite store: open, run migrations, `sync all`, `sync symbols/positions/orders/deals/history-orders/bars/ticks`, `sql` | ✅ | Migrations runner with `go:embed` of `internal/store/migrations/*.sql`. Bridge wrappers for `SymbolsGet/PositionsGet/OrdersGet/HistoryDealsGet/HistoryOrdersGet/CopyRatesRange/CopyTicksRange`. Sync orchestration with upsert semantics. Bridge auto-`symbol_select` before bars/ticks fetches. `pp-mt5 sql` is read-only by default; `--write` opt-in. End-to-end verified: 301 symbols, 120 H1 bars (EURUSD.s), 3969 ticks pulled and queryable. |
 | 3 | Read commands: symbols, quote, book, positions list, orders list, history, stats summary, risk preview | ⬜ | All commands wired with flags; handlers return notImpl. |
 | 4 | Algo stats: by-symbol/hour/dow/magic, streaks, drawdown, r-multiples, correlation, magic audit | ⬜ | Same — wired, stubbed. |
 | 5 | Safety layer: live-mode gate, hash-confirm, guardrails, audit log | 🟡 | Live-mode gate + hash + window + kill-switch all implemented and unit-tested in `internal/safety`. Audit log + remaining guardrails (`max_volume_per_order`, `max_open_positions`, `max_daily_loss`) are Phase 6. |
@@ -35,8 +35,6 @@ The next agent should:
 4. When a phase moves from ⬜ → 🟡 or 🟡 → ✅, update this file in the same commit.
 
 ## What's intentionally NOT in the scaffold
-
-- Real database connections in handlers (Phase 2).
 - Audit log writes (Phase 6).
 - Any actual order/position/close write path (Phase 7).
 - MCP tools (Phase 10).

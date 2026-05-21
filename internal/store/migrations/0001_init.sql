@@ -9,7 +9,10 @@
 
 BEGIN;
 
-CREATE TABLE schema_migrations (
+-- schema_migrations is bootstrapped by the Go runner before any migration
+-- runs (the runner needs to query applied versions). IF NOT EXISTS makes
+-- this file safely re-applicable.
+CREATE TABLE IF NOT EXISTS schema_migrations (
     version    INTEGER PRIMARY KEY,
     applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
 );
