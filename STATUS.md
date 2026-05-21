@@ -13,7 +13,7 @@ The CLI is being built in 11 phases per the design spec. This file tracks where 
 | # | Phase                                       | Status | Notes |
 |---|---------------------------------------------|--------|-------|
 | 0 | Scaffold (go.mod, command tree, README, schema, manifest, skill, MCP stub, helper TODO) | ✅ | Builds + `go vet` clean. Safety hash/window/kill-switch unit-tested. |
-| 1 | Python bridge real implementation; `doctor`, `connect login`, `account info`, `terminal info` | ⬜ | `bridge/mt5_bridge.py` has all 30 handler signatures; `serve()` loop works; needs Go-side spawn + JSON-RPC client + per-command typed wrappers. |
+| 1 | Python bridge real implementation; `doctor`, `connect login`, `account info`, `terminal info`, `connect status`, `connect logout` | ✅ | Go-side `bridge.Bridge` spawns Python via embedded `mt5_bridge.py` (`go:embed`), line-delimited JSON-RPC, per-call timeout, sentinel-error mapping. Typed wrappers for `Initialize/Login/Shutdown/AccountInfo/TerminalInfo/Version`. `doctor` runs 7 checks, each with structured remediation. `account info`/`terminal info`/`connect status` print human tables or JSON depending on `--json/--agent/--human-friendly`/TTY detection. End-to-end smoke tested against a JustMarkets demo account. |
 | 2 | SQLite store: open, run migrations, `sync all`, `sql` | ⬜ | `migrations/0001_init.sql` is complete; store.Open() is implemented; needs migrations runner and sync orchestration. |
 | 3 | Read commands: symbols, quote, book, positions list, orders list, history, stats summary, risk preview | ⬜ | All commands wired with flags; handlers return notImpl. |
 | 4 | Algo stats: by-symbol/hour/dow/magic, streaks, drawdown, r-multiples, correlation, magic audit | ⬜ | Same — wired, stubbed. |
@@ -36,7 +36,6 @@ The next agent should:
 
 ## What's intentionally NOT in the scaffold
 
-- Real Python-bridge spawn from Go (Phase 1 — current `bridge.SelfTest()` is loadability-only).
 - Real database connections in handlers (Phase 2).
 - Audit log writes (Phase 6).
 - Any actual order/position/close write path (Phase 7).
