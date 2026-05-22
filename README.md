@@ -8,7 +8,7 @@ $ pp-mt5 close all losing positions over 50 pips and tighten stops on the rest
 
 Behind that one line: fetch positions, filter by pip P&L, close losers, tighten SL on winners — one round trip, one safety hash, one audit row. Every write command goes through the same path.
 
-> **Status: Phases 0–9 complete** — foundation, store, reads, algo, safety, config, writes, hero flow, and the quant stack (bars/ticks export, features, replay, sma-cross backtest). Remaining: MCP server (Phase 10), integration tests + release polish (Phase 11). See [STATUS.md](./STATUS.md).
+> **Status: Phases 0–10 complete** — foundation, store, reads, algo, safety, config, writes, hero flow, the quant stack (bars/ticks export, features, replay, sma-cross backtest), and the MCP server (`mt5-pp-mcp` exposes 18 tools via stdio JSON-RPC). Remaining: integration tests + release polish (Phase 11). See [STATUS.md](./STATUS.md).
 
 ---
 
@@ -218,14 +218,32 @@ A skill ships at [`SKILL.md`](./SKILL.md). After install, `/pp-mt5` is available
 
 ---
 
-## Claude Desktop MCPB
+## Claude Desktop MCP
 
-`mt5-pp-mcp` (Phase 10) exposes the command tree over MCP. Install:
+`mt5-pp-mcp` exposes the command tree over MCP via stdio. 18 tools cover the full surface:
+
+- **Foundation** — `mt5_doctor`, `mt5_account_info`, `mt5_terminal_info`
+- **Live reads** — `mt5_symbols_list`, `mt5_quote`, `mt5_positions_list`, `mt5_orders_list`, `mt5_history_deals`, `mt5_risk_preview`
+- **Algo** — `mt5_stats_summary`, `mt5_sql` (read-only)
+- **Sync** — `mt5_sync_all`
+- **Writes** — `mt5_order_check` (preview), `mt5_order_send`, `mt5_close_all` (dry-run + `confirm`)
+- **Quant** — `mt5_backtest_run`, `mt5_backtest_list`
+- **Audit** — `mt5_audit_tail`
+
+Install + register:
 
 ```bash
 go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-mcp@latest
 claude mcp add mt5-pp-mcp -- mt5-pp-mcp
 ```
+
+List tool names without booting the server:
+
+```bash
+mt5-pp-mcp --list-tools
+```
+
+Every write tool runs the same safety pipeline as the CLI — first call returns a SHA-256 intent hash; the agent must surface the dry-run summary to the human and re-call with `confirm: <hash>` to actually execute. Tools advertise `readOnlyHint` and `destructiveHint` so the host can colour calls appropriately.
 
 ---
 
