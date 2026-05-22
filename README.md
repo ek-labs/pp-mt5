@@ -8,7 +8,7 @@ $ pp-mt5 close all losing positions over 50 pips and tighten stops on the rest
 
 Behind that one line: fetch positions, filter by pip P&L, close losers, tighten SL on winners — one round trip, one safety hash, one audit row. Every write command goes through the same path.
 
-> ⚠️ **Status: scaffold (Phase 0 complete).** Command surface is wired but most handlers return `not implemented` and point at the phase that delivers them. See [STATUS.md](./STATUS.md) for what works today and what's next.
+> **Status: Phases 0–9 complete** — foundation, store, reads, algo, safety, config, writes, hero flow, and the quant stack (bars/ticks export, features, replay, sma-cross backtest). Remaining: MCP server (Phase 10), integration tests + release polish (Phase 11). See [STATUS.md](./STATUS.md).
 
 ---
 
