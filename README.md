@@ -8,7 +8,7 @@ $ pp-mt5 close all losing positions over 50 pips and tighten stops on the rest
 
 Behind that one line: fetch positions, filter by pip P&L, close losers, tighten SL on winners — one round trip, one safety hash, one audit row. Every write command goes through the same path.
 
-> **Status: Phases 0–10 complete** — foundation, store, reads, algo, safety, config, writes, hero flow, the quant stack (bars/ticks export, features, replay, sma-cross backtest), and the MCP server (`mt5-pp-mcp` exposes 18 tools via stdio JSON-RPC). Remaining: integration tests + release polish (Phase 11). See [STATUS.md](./STATUS.md).
+**What works today:** every command in the reference below. Foundation, local mirror, live reads, algo analytics, the safety pipeline, writes, the hero flow, the quant stack (bars/ticks export, features, replay, sma-cross backtest), and `mt5-pp-mcp` exposing 18 MCP tools over stdio. The full phased build log lives in [STATUS.md](./STATUS.md).
 
 ---
 
@@ -25,8 +25,20 @@ Behind that one line: fetch positions, filter by pip P&L, close losers, tighten 
 
 ```bash
 go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-cli@latest
+go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-mcp@latest
 py -3 -m pip install MetaTrader5      # Windows only
 ```
+
+Or build from source with a version stamp:
+
+```powershell
+cd library\trading\mt5
+.\scripts\build.ps1 -Version v0.1.0
+.\bin\mt5-pp-cli.exe --version
+.\bin\mt5-pp-mcp.exe --version
+```
+
+The script stamps `cli.Version` via `-ldflags`; both binaries pick it up from the same variable.
 
 Verify:
 
@@ -258,6 +270,27 @@ Every write tool runs the same safety pipeline as the CLI — first call returns
 | `exit 6 — safety-layer rejected`              | Missing `MT5_LIVE=1` env, missing `--i-understand-this-is-live`, expired hash, or kill switch file present |
 | `exit 11 — terminal unreachable`              | `mt5.initialize()` returned False; restart the terminal                      |
 | Hash mismatch                                 | The 60-second window expired or your command flags changed — re-run dry-run |
+
+---
+
+## Testing
+
+```bash
+go test ./...                                    # pure-helper unit tests
+go test -tags=integration -v ./test/integration  # demo-account smoke tests
+```
+
+Integration tests opt-in three ways: the `integration` build tag, `MT5_PAPER=1` in the environment, plus an in-test `AccountInfo().IsLive()` check that fatals if `trade_mode == 2`. Without any one of those, the suite skips; with all three, it exercises doctor / account info / sync / read commands / dry-run writes / sql / audit against a live demo terminal.
+
+```powershell
+$env:MT5_PAPER     = "1"
+$env:MT5_ACCOUNT   = "12345678"
+$env:MT5_SERVER    = "JustMarkets-Demo"
+$env:MT5_PASSWORD  = "..."
+go test -tags=integration -v -timeout 120s ./test/integration
+```
+
+The dry-run write tests never pass `--confirm` so no order ever reaches the broker even on a demo account — they verify that the safety gate returns exit 6 and produces a hash.
 
 ---
 

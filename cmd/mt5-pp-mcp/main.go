@@ -26,7 +26,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("mt5-pp-mcp", ppmcp.ServerVersion)
+		fmt.Println("mt5-pp-mcp", ppmcp.ServerVersion())
 		return
 	}
 

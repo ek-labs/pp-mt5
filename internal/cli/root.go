@@ -8,7 +8,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Version is overridden via -ldflags by release builds.
+// Version is the binary version reported by `pp-mt5 --version`. Release
+// builds override via -ldflags:
+//
+//	go build -ldflags "-X github.com/.../internal/cli.Version=v0.1.0" ./...
+//
+// The MCP server reads the same variable via mcp.ServerVersion().
 var Version = "0.1.0-dev"
 
 // ExitErr lets handlers signal a specific exit code documented in the spec.

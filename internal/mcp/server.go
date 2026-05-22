@@ -22,16 +22,16 @@ import (
 	cli "github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/cli"
 )
 
-// ServerVersion mirrors cli.Version at build time. Overridden via -ldflags
-// alongside the CLI when shipped.
-var ServerVersion = "0.1.0-dev"
+// ServerVersion is the version reported by the MCP server. It tracks
+// cli.Version so a single -ldflags stamp at build time updates both binaries.
+func ServerVersion() string { return cli.Version }
 
 // NewServer builds the MCP server and registers every tool. The server is
 // ready to be served over a transport.
 func NewServer() *server.MCPServer {
 	s := server.NewMCPServer(
 		"pp-mt5",
-		ServerVersion,
+		ServerVersion(),
 		server.WithToolCapabilities(true),
 	)
 
