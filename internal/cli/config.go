@@ -18,7 +18,7 @@ func newConfigInitCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "config-init",
-		Short: "Write an example ~/.config/mt5-pp-cli/config.toml",
+		Short: "Write an example ~/.config/pp-mt5/config.toml",
 		Long: `Create the config file at its default location with all guardrails set
 to safe defaults, plus commented-out profile templates. Refuses to overwrite
 unless --force is passed.`,

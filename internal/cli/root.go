@@ -1,4 +1,4 @@
-// Package cli wires the Cobra command tree for mt5-pp-cli.
+// Package cli wires the Cobra command tree for pp-mt5.
 package cli
 
 import (
@@ -31,7 +31,7 @@ func (e *ExitErr) Error() string {
 
 func (e *ExitErr) Unwrap() error { return e.Err }
 
-// Exit constants documented in cmd/mt5-pp-cli/main.go.
+// Exit constants documented in cmd/pp-mt5/main.go.
 const (
 	ExitOK              = 0
 	ExitUsage           = 2
@@ -91,7 +91,7 @@ See pp-mt5 doctor for any setup issue and pp-mt5 <command> --help per command.`,
 	pf.Bool("compact", false, "Compact JSON (no indent)")
 	pf.Bool("no-input", false, "Never prompt; fail if input would be needed")
 	pf.Bool("yes", false, "Auto-confirm interactive prompts (does NOT bypass safety hash)")
-	pf.String("profile", "", "Named connection profile from ~/.config/mt5-pp-cli/config.toml")
+	pf.String("profile", "", "Named connection profile from ~/.config/pp-mt5/config.toml")
 	pf.Duration("timeout", 0, "Per-command timeout (0 = use default)")
 	pf.Bool("verbose", false, "Verbose diagnostic output to stderr")
 

@@ -5,10 +5,10 @@
 // Path resolution (first hit wins):
 //
 //	$MT5_PP_STORE
-//	$XDG_DATA_HOME/mt5-pp-cli/store.db
-//	Windows: %LOCALAPPDATA%\mt5-pp-cli\store.db
-//	Mac:     ~/Library/Application Support/mt5-pp-cli/store.db
-//	Linux:   ~/.local/share/mt5-pp-cli/store.db
+//	$XDG_DATA_HOME/pp-mt5/store.db
+//	Windows: %LOCALAPPDATA%\pp-mt5\store.db
+//	Mac:     ~/Library/Application Support/pp-mt5/store.db
+//	Linux:   ~/.local/share/pp-mt5/store.db
 //
 // SQLite driver is modernc.org/sqlite — pure Go, no cgo.
 package store
@@ -38,19 +38,19 @@ func DefaultPath() string {
 		return env
 	}
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "mt5-pp-cli", "store.db")
+		return filepath.Join(xdg, "pp-mt5", "store.db")
 	}
 	home, _ := os.UserHomeDir()
 	switch runtime.GOOS {
 	case "windows":
 		if local := os.Getenv("LOCALAPPDATA"); local != "" {
-			return filepath.Join(local, "mt5-pp-cli", "store.db")
+			return filepath.Join(local, "pp-mt5", "store.db")
 		}
-		return filepath.Join(home, "AppData", "Local", "mt5-pp-cli", "store.db")
+		return filepath.Join(home, "AppData", "Local", "pp-mt5", "store.db")
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "mt5-pp-cli", "store.db")
+		return filepath.Join(home, "Library", "Application Support", "pp-mt5", "store.db")
 	default:
-		return filepath.Join(home, ".local", "share", "mt5-pp-cli", "store.db")
+		return filepath.Join(home, ".local", "share", "pp-mt5", "store.db")
 	}
 }
 
@@ -72,6 +72,35 @@ func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
+	}
+	return db, nil
+}
+
+// OpenReadOnly opens the store with mode=ro. SQLite refuses every write at the
+// engine level — including writes hidden inside a CTE (`WITH x AS (...) DELETE
+// FROM ...`) — so callers that route untrusted SQL (e.g. the MCP server's
+// mt5_sql tool) can give the DB to the user without auditing each query.
+//
+// Errors out if the file doesn't exist yet — read-only mode can't create the
+// file, and silently creating an empty mirror would mask "you forgot to sync"
+// as "your query returned no rows".
+func OpenReadOnly(path string) (*sql.DB, error) {
+	if path == "" {
+		path = DefaultPath()
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("store not initialized at %s — run `pp-mt5 sync all` first", path)
+		}
+		return nil, err
+	}
+	// mode=ro: SQLite opens the file read-only and refuses any write.
+	// immutable=1 would be stricter still but breaks concurrent writers on the
+	// same file. WAL mode already lets a writer and many readers coexist.
+	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open store ro: %w", err)
 	}
 	return db, nil
 }

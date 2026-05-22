@@ -461,7 +461,7 @@ Safety flow:
   2. Re-run with --confirm <hash> within 60 seconds to actually send.
   3. Real-account writes additionally require MT5_LIVE=1 AND
      --i-understand-this-is-live (skipped on demo and contest accounts).
-  4. Per-command guardrails from ~/.config/mt5-pp-cli/config.toml apply.
+  4. Per-command guardrails from ~/.config/pp-mt5/config.toml apply.
   5. Every attempt is appended to <store_dir>/audit.jsonl AND the audit DB
      table (queryable via 'pp-mt5 sql').`,
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -1,4 +1,4 @@
-// mt5-pp-cli is the Printing Press CLI for MetaTrader 5.
+// pp-mt5 is the Printing Press CLI for MetaTrader 5.
 //
 // One binary serves three audiences:
 //   - Live discretionary traders (quote, book, positions, order send, close all)
@@ -7,7 +7,7 @@
 //
 // All commands route through a Python subprocess (bridge/mt5_bridge.py)
 // that wraps the official MetaTrader5 package. A local SQLite mirror at
-// ~/.local/share/mt5-pp-cli/store.db keeps queries off the hot path.
+// ~/.local/share/pp-mt5/store.db keeps queries off the hot path.
 //
 // Safety: any write command (order send, position close/modify, close all)
 // requires BOTH `MT5_LIVE=1` in the environment AND `--i-understand-this-is-live`

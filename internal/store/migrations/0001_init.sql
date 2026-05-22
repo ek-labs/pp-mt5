@@ -1,4 +1,4 @@
--- mt5-pp-cli local mirror schema
+-- pp-mt5 local mirror schema
 -- Migration 0001: initial tables
 -- Runner: internal/store will apply pending migrations on first Open().
 --

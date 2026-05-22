@@ -8,7 +8,7 @@ $ pp-mt5 close all losing positions over 50 pips and tighten stops on the rest
 
 Behind that one line: fetch positions, filter by pip P&L, close losers, tighten SL on winners — one round trip, one safety hash, one audit row. Every write command goes through the same path.
 
-**What works today:** every command in the reference below. Foundation, local mirror, live reads, algo analytics, the safety pipeline, writes, the hero flow, the quant stack (bars/ticks export, features, replay, sma-cross backtest), and `mt5-pp-mcp` exposing 18 MCP tools over stdio. The full phased build log lives in [STATUS.md](./STATUS.md).
+**What works today:** every command in the reference below. Foundation, local mirror, live reads, algo analytics, the safety pipeline, writes, the hero flow, the quant stack (bars/ticks export, features, replay, sma-cross backtest), and `pp-mt5-mcp` exposing 18 MCP tools over stdio. The full phased build log lives in [STATUS.md](./STATUS.md).
 
 ---
 
@@ -24,8 +24,8 @@ Behind that one line: fetch positions, filter by pip P&L, close losers, tighten 
 ## Install
 
 ```bash
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-cli@latest
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-mcp@latest
+go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5@latest
+go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5-mcp@latest
 py -3 -m pip install MetaTrader5      # Windows only
 ```
 
@@ -34,8 +34,8 @@ Or build from source with a version stamp:
 ```powershell
 cd library\trading\mt5
 .\scripts\build.ps1 -Version v0.1.0
-.\bin\mt5-pp-cli.exe --version
-.\bin\mt5-pp-mcp.exe --version
+.\bin\pp-mt5.exe --version
+.\bin\pp-mt5-mcp.exe --version
 ```
 
 The script stamps `cli.Version` via `-ldflags`; both binaries pick it up from the same variable.
@@ -59,7 +59,7 @@ $env:MT5_PASSWORD = "..."
 pp-mt5 connect login --account 12345678 --server "Broker-Live" --password-env MT5_PASSWORD
 ```
 
-For headless / CI use, save a profile to `~/.config/mt5-pp-cli/config.toml`:
+For headless / CI use, save a profile to `~/.config/pp-mt5/config.toml`:
 
 ```toml
 [profiles.demo]
@@ -118,7 +118,7 @@ Behind the scenes: snapshot live positions → SELECT WHERE filter → resolve t
 
 ### Local SQLite mirror
 
-`~/.local/share/mt5-pp-cli/store.db` (path varies by OS). Tables: `symbols`, `ticks`, `bars_M1`..`bars_MN1`, `orders`, `history_orders`, `positions`, `deals`, `calendar_events`, `features`, `backtests`, `audit`, `schema_migrations`. Query directly:
+`~/.local/share/pp-mt5/store.db` (path varies by OS). Tables: `symbols`, `ticks`, `bars_M1`..`bars_MN1`, `orders`, `history_orders`, `positions`, `deals`, `calendar_events`, `features`, `backtests`, `audit`, `schema_migrations`. Query directly:
 
 ```bash
 pp-mt5 sql "select * from deals where time_ms > strftime('%s','now','-30 days')*1000"
@@ -130,8 +130,8 @@ Defense in depth — every write goes through:
 
 1. **Live-mode gate.** Both `MT5_LIVE=1` env AND `--i-understand-this-is-live` flag required for any live write. Either missing → exit 6.
 2. **Hash-confirm.** First invocation prints `SHA-256` of the canonical request and exits 6. Re-run with `--confirm <hash>` within 60s.
-3. **Per-command guardrails** from `~/.config/mt5-pp-cli/config.toml`: `max_volume_per_order`, `max_open_positions`, `max_daily_loss`, `kill_switch_file` (a single touched file refuses all writes).
-4. **Audit log** appended to `~/.local/share/mt5-pp-cli/audit.jsonl` — every write, hash, response. Never deleted by the CLI.
+3. **Per-command guardrails** from `~/.config/pp-mt5/config.toml`: `max_volume_per_order`, `max_open_positions`, `max_daily_loss`, `kill_switch_file` (a single touched file refuses all writes).
+4. **Audit log** appended to `~/.local/share/pp-mt5/audit.jsonl` — every write, hash, response. Never deleted by the CLI.
 
 ### Tick-accurate replay
 
@@ -232,7 +232,7 @@ A skill ships at [`SKILL.md`](./SKILL.md). After install, `/pp-mt5` is available
 
 ## Claude Desktop MCP
 
-`mt5-pp-mcp` exposes the command tree over MCP via stdio. 18 tools cover the full surface:
+`pp-mt5-mcp` exposes the command tree over MCP via stdio. 18 tools cover the full surface:
 
 - **Foundation** — `mt5_doctor`, `mt5_account_info`, `mt5_terminal_info`
 - **Live reads** — `mt5_symbols_list`, `mt5_quote`, `mt5_positions_list`, `mt5_orders_list`, `mt5_history_deals`, `mt5_risk_preview`
@@ -245,14 +245,14 @@ A skill ships at [`SKILL.md`](./SKILL.md). After install, `/pp-mt5` is available
 Install + register:
 
 ```bash
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-mcp@latest
-claude mcp add mt5-pp-mcp -- mt5-pp-mcp
+go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5-mcp@latest
+claude mcp add pp-mt5-mcp -- pp-mt5-mcp
 ```
 
 List tool names without booting the server:
 
 ```bash
-mt5-pp-mcp --list-tools
+pp-mt5-mcp --list-tools
 ```
 
 Every write tool runs the same safety pipeline as the CLI — first call returns a SHA-256 intent hash; the agent must surface the dry-run summary to the human and re-call with `confirm: <hash>` to actually execute. Tools advertise `readOnlyHint` and `destructiveHint` so the host can colour calls appropriately.

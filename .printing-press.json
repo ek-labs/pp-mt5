@@ -2,7 +2,7 @@
   "schema_version": 1,
   "api_name": "mt5",
   "display_name": "MetaTrader 5",
-  "cli_name": "mt5-pp-cli",
+  "cli_name": "pp-mt5",
   "owner": "mvanhorn",
   "printer": "mvanhorn",
   "printer_name": "Matt Van Horn",
@@ -20,7 +20,7 @@
     {
       "name": "Local SQLite mirror of MT5 state",
       "command": "pp-mt5 sync all && pp-mt5 sql \"...\"",
-      "description": "Symbols, ticks, bars (per timeframe), orders, deals, positions, calendar, features, backtests mirrored to ~/.local/share/mt5-pp-cli/store.db. Microsecond reads instead of 50ms bridge round-trips."
+      "description": "Symbols, ticks, bars (per timeframe), orders, deals, positions, calendar, features, backtests mirrored to ~/.local/share/pp-mt5/store.db. Microsecond reads instead of 50ms bridge round-trips."
     },
     {
       "name": "Defense-in-depth safety layer",

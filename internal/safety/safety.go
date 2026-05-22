@@ -6,7 +6,7 @@
 //     in env AND --i-understand-this-is-live on the command must BOTH be
 //     present. Demo and contest accounts skip the live gate.
 //
-//  2. Per-command guardrails from ~/.config/mt5-pp-cli/config.toml:
+//  2. Per-command guardrails from ~/.config/pp-mt5/config.toml:
 //     - kill_switch_file: a single touched file refuses all writes
 //     - max_volume_per_order: rejects on volume > N (0 = no limit)
 //     - max_open_positions: rejects if currently open >= N (0 = no limit)

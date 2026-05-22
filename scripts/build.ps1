@@ -1,4 +1,4 @@
-# Build mt5-pp-cli and mt5-pp-mcp with a version stamp.
+# Build pp-mt5 and pp-mt5-mcp with a version stamp.
 #
 # Usage:
 #   .\scripts\build.ps1                  # dev build (0.1.0-dev)
@@ -29,15 +29,15 @@ $ldflags = "-X github.com/mvanhorn/printing-press-library/library/trading/mt5/in
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-Write-Host "Building mt5-pp-cli  version=$Version → $OutDir\mt5-pp-cli.exe"
-& go build -ldflags $ldflags -o (Join-Path $OutDir "mt5-pp-cli.exe") ./cmd/mt5-pp-cli
-if ($LASTEXITCODE -ne 0) { throw "build mt5-pp-cli failed" }
+Write-Host "Building pp-mt5  version=$Version → $OutDir\pp-mt5.exe"
+& go build -ldflags $ldflags -o (Join-Path $OutDir "pp-mt5.exe") ./cmd/pp-mt5
+if ($LASTEXITCODE -ne 0) { throw "build pp-mt5 failed" }
 
-Write-Host "Building mt5-pp-mcp  version=$Version → $OutDir\mt5-pp-mcp.exe"
-& go build -ldflags $ldflags -o (Join-Path $OutDir "mt5-pp-mcp.exe") ./cmd/mt5-pp-mcp
-if ($LASTEXITCODE -ne 0) { throw "build mt5-pp-mcp failed" }
+Write-Host "Building pp-mt5-mcp  version=$Version → $OutDir\pp-mt5-mcp.exe"
+& go build -ldflags $ldflags -o (Join-Path $OutDir "pp-mt5-mcp.exe") ./cmd/pp-mt5-mcp
+if ($LASTEXITCODE -ne 0) { throw "build pp-mt5-mcp failed" }
 
 Write-Host ""
 Write-Host "OK. Verify:"
-Write-Host "  $OutDir\mt5-pp-cli.exe --version"
-Write-Host "  $OutDir\mt5-pp-mcp.exe --version"
+Write-Host "  $OutDir\pp-mt5.exe --version"
+Write-Host "  $OutDir\pp-mt5-mcp.exe --version"

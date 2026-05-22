@@ -41,7 +41,7 @@ func NewServer() *server.MCPServer {
 	return s
 }
 
-// ListToolNames returns every registered tool name. Used by 'mt5-pp-mcp
+// ListToolNames returns every registered tool name. Used by 'pp-mt5-mcp
 // --list-tools' for smoke tests and documentation.
 func ListToolNames() []string {
 	regs := tools()

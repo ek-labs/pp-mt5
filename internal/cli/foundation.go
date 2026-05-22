@@ -59,7 +59,7 @@ func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Verify Python, MetaTrader5 package, terminal, login, and network path",
-		Long: `Run a full preflight check of the mt5-pp-cli install.
+		Long: `Run a full preflight check of the pp-mt5 install.
 
 Each check prints PASS, FAIL, or SKIP with the exact remediation hint.
 If anything red blocks live commands, doctor reports it before you discover
@@ -736,10 +736,21 @@ Read-only by default — INSERT/UPDATE/DELETE/DROP/ALTER require --write.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
+			// looksLikeWrite is a fast UX guard so writers see a clear "use
+			// --write" message instead of a cryptic SQLite error. The actual
+			// gate is the read-only connection below: SQLite refuses every
+			// write at the engine level, including writes smuggled inside a
+			// CTE like `WITH x AS (SELECT 1) DELETE FROM audit`.
 			if !allowWrite && looksLikeWrite(query) {
 				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("query looks like a write — re-run with --write to allow it")}
 			}
-			db, err := store.OpenAndMigrate("")
+			var db *sql.DB
+			var err error
+			if allowWrite {
+				db, err = store.OpenAndMigrate("")
+			} else {
+				db, err = store.OpenReadOnly("")
+			}
 			if err != nil {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}

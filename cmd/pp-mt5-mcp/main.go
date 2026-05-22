@@ -1,4 +1,4 @@
-// mt5-pp-mcp exposes the mt5-pp-cli command tree over the MCP protocol so
+// pp-mt5-mcp exposes the pp-mt5 command tree over the MCP protocol so
 // Claude Desktop and other MCP clients can drive MetaTrader 5 directly.
 //
 // Transport: stdio (the default MCP transport). Logs go to stderr; stdout is
@@ -6,8 +6,8 @@
 //
 // Install + register with Claude Desktop:
 //
-//	go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-mcp@latest
-//	claude mcp add mt5-pp-mcp -- mt5-pp-mcp
+//	go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5-mcp@latest
+//	claude mcp add pp-mt5-mcp -- pp-mt5-mcp
 package main
 
 import (
@@ -26,7 +26,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("mt5-pp-mcp", ppmcp.ServerVersion())
+		fmt.Println("pp-mt5-mcp", ppmcp.ServerVersion())
 		return
 	}
 
@@ -40,7 +40,7 @@ func main() {
 	}
 
 	if err := server.ServeStdio(s); err != nil {
-		fmt.Fprintf(os.Stderr, "mt5-pp-mcp: %v\n", err)
+		fmt.Fprintf(os.Stderr, "pp-mt5-mcp: %v\n", err)
 		os.Exit(1)
 	}
 }

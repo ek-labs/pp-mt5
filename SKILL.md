@@ -9,13 +9,13 @@ metadata:
   openclaw:
     requires:
       bins:
-        - mt5-pp-cli
+        - pp-mt5
       pythons:
         - MetaTrader5
     install:
       - kind: go
-        bins: [mt5-pp-cli]
-        module: github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-cli
+        bins: [pp-mt5]
+        module: github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5
       - kind: pip
         packages: [MetaTrader5]
         platform: windows
@@ -28,7 +28,7 @@ metadata:
 ## Prerequisites
 
 ```bash
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/mt5-pp-cli@latest
+go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5@latest
 py -3 -m pip install MetaTrader5      # Windows only
 pp-mt5 doctor
 ```
@@ -54,7 +54,7 @@ Every write command is dry-run by default:
 1. First invocation prints a SHA-256 of the canonical request and exits **6** (safety-rejected).
 2. Re-invoke with `--confirm <hash>` within **60 seconds**. The window is the rolling 60s bucket, not from-when-you-printed.
 3. Live writes additionally require **`MT5_LIVE=1`** in env **AND** **`--i-understand-this-is-live`** on the command. Missing either → exit 6.
-4. A kill switch file (`kill_switch_file` in `~/.config/mt5-pp-cli/config.toml`) — if present — rejects every write unconditionally.
+4. A kill switch file (`kill_switch_file` in `~/.config/pp-mt5/config.toml`) — if present — rejects every write unconditionally.
 
 **As an agent, never set `MT5_LIVE=1` yourself.** That's a user action only.
 

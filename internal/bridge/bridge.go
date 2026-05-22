@@ -260,7 +260,7 @@ func FindPython() (string, error) {
 // and returns it. Stable filename means re-runs reuse the same file (lets the
 // user inspect or attach a debugger).
 func materializeScript() (string, error) {
-	dir := filepath.Join(os.TempDir(), "mt5-pp-cli")
+	dir := filepath.Join(os.TempDir(), "pp-mt5")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}

@@ -1,4 +1,4 @@
-// Package config loads ~/.config/mt5-pp-cli/config.toml.
+// Package config loads ~/.config/pp-mt5/config.toml.
 //
 // The file holds named broker connection profiles and the per-command
 // guardrail thresholds enforced by the safety layer. It is created with sane
@@ -46,19 +46,19 @@ func DefaultPath() string {
 		return env
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "mt5-pp-cli", "config.toml")
+		return filepath.Join(xdg, "pp-mt5", "config.toml")
 	}
 	home, _ := os.UserHomeDir()
 	switch runtime.GOOS {
 	case "windows":
 		if app := os.Getenv("APPDATA"); app != "" {
-			return filepath.Join(app, "mt5-pp-cli", "config.toml")
+			return filepath.Join(app, "pp-mt5", "config.toml")
 		}
-		return filepath.Join(home, "AppData", "Roaming", "mt5-pp-cli", "config.toml")
+		return filepath.Join(home, "AppData", "Roaming", "pp-mt5", "config.toml")
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "mt5-pp-cli", "config.toml")
+		return filepath.Join(home, "Library", "Application Support", "pp-mt5", "config.toml")
 	default:
-		return filepath.Join(home, ".config", "mt5-pp-cli", "config.toml")
+		return filepath.Join(home, ".config", "pp-mt5", "config.toml")
 	}
 }
 
@@ -94,7 +94,7 @@ func WriteDefault(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	const example = `# mt5-pp-cli config — generated default. Edit and re-run.
+	const example = `# pp-mt5 config — generated default. Edit and re-run.
 # See: pp-mt5 doctor for the resolved values.
 
 # Default profile used when --profile is not passed.
