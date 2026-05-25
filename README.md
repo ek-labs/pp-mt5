@@ -3,10 +3,10 @@
 > One CLI that turns MetaTrader 5 into a forensic record of every decision you ever made in markets — plus a tick-accurate replay engine — and makes both queryable from the shell.
 
 ```text
-$ pp-mt5 close all losing positions over 50 pips and tighten stops on the rest
+$ pp-mt5 close all --filter "profit < 0 OR (symbol = 'EURUSD.s' AND volume > 0.05)"
 ```
 
-Behind that one line: fetch positions, filter by pip P&L, close losers, tighten SL on winners — one round trip, one safety hash, one audit row. Every write command goes through the same path.
+Behind that one line: snapshot live positions to the local mirror, SELECT the candidates by SQL predicate, print them with projected P&L, hash the intent (tickets + filter — not price), and gate execution on `--confirm <hash>`. One round trip, one audit row per ticket. Every write command goes through the same path.
 
 **What works today:** every command in the reference below. Foundation, local mirror, live reads, algo analytics, the safety pipeline, writes, the hero flow, the quant stack (bars/ticks export, features, replay, sma-cross backtest), and `pp-mt5-mcp` exposing 18 MCP tools over stdio. The full phased build log lives in [STATUS.md](./STATUS.md).
 
@@ -129,7 +129,7 @@ pp-mt5 sql "select * from deals where time_ms > strftime('%s','now','-30 days')*
 Defense in depth — every write goes through:
 
 1. **Live-mode gate.** Both `MT5_LIVE=1` env AND `--i-understand-this-is-live` flag required for any live write. Either missing → exit 6.
-2. **Hash-confirm.** First invocation prints `SHA-256` of the canonical request and exits 6. Re-run with `--confirm <hash>` within 60s.
+2. **Hash-confirm.** First invocation prints `SHA-256` of the canonical request and exits 6. Re-run with `--confirm <hash>` within the validity window. The window is bucketed: the hash is valid in its own bucket and the previous one, so depending on when you got the hash, you have **anywhere from 60s to ~120s** before it expires.
 3. **Per-command guardrails** from `~/.config/pp-mt5/config.toml`: `max_volume_per_order`, `max_open_positions`, `max_daily_loss`, `kill_switch_file` (a single touched file refuses all writes).
 4. **Audit log** appended to `~/.local/share/pp-mt5/audit.jsonl` — every write, hash, response. Never deleted by the CLI.
 
@@ -269,7 +269,7 @@ Every write tool runs the same safety pipeline as the CLI — first call returns
 | `exit 4 — auth`                               | Wrong account/server/password; verify in the terminal first                  |
 | `exit 6 — safety-layer rejected`              | Missing `MT5_LIVE=1` env, missing `--i-understand-this-is-live`, expired hash, or kill switch file present |
 | `exit 11 — terminal unreachable`              | `mt5.initialize()` returned False; restart the terminal                      |
-| Hash mismatch                                 | The 60-second window expired or your command flags changed — re-run dry-run |
+| Hash mismatch                                 | The validity window (60–120s, bucketed) expired or your command flags changed — re-run dry-run |
 
 ---
 

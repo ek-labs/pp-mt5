@@ -92,6 +92,7 @@ See pp-mt5 doctor for any setup issue and pp-mt5 <command> --help per command.`,
 	pf.Bool("no-input", false, "Never prompt; fail if input would be needed")
 	pf.Bool("yes", false, "Auto-confirm interactive prompts (does NOT bypass safety hash)")
 	pf.String("profile", "", "Named connection profile from ~/.config/pp-mt5/config.toml")
+	pf.Int64("account", 0, "Restrict mirror reads to this account_login (default: most recently synced account)")
 	pf.Duration("timeout", 0, "Per-command timeout (0 = use default)")
 	pf.Bool("verbose", false, "Verbose diagnostic output to stderr")
 

@@ -116,8 +116,8 @@ Reads from the symbols table — run 'pp-mt5 sync symbols' first if it's empty.
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			info, err := b.SymbolInfo(args[0])
 			if err != nil {
@@ -179,8 +179,8 @@ func newQuoteCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			info, err := b.SymbolInfo(args[0])
 			if err != nil {
@@ -232,8 +232,8 @@ func newBookCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			items, err := b.MarketBookGet(args[0])
 			if err != nil {
@@ -277,8 +277,8 @@ func newPositionsCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			req := map[string]any{}
 			if symbol != "" {
@@ -343,8 +343,8 @@ func newOrdersCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			req := map[string]any{}
 			if symbol != "" {
@@ -408,8 +408,8 @@ func newOrderCheckCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			tick, _ := b.SymbolInfoTick(symbol)
 			if price == 0 && tick != nil {
@@ -811,9 +811,9 @@ func (w writeCtx) openAll() (*bridge.Bridge, *sql.DB, *bridge.AccountInfo, safet
 	if err != nil {
 		return nil, nil, nil, g, err
 	}
-	if err := b.Initialize(defaultInit(10000)); err != nil {
+	if err := initBridge(w.cmd, b, 10000); err != nil {
 		_ = b.Close()
-		return nil, nil, nil, g, mapBridgeErr(err)
+		return nil, nil, nil, g, err
 	}
 	acc, err := b.AccountInfo()
 	if err != nil {
@@ -1129,8 +1129,8 @@ func newRiskCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			info, err := b.SymbolInfo(symbol)
 			if err != nil {

@@ -60,8 +60,10 @@ func newBarsCopyCmd() *cobra.Command {
 --out forms:
   csv:path/to/file.csv      → CSV with header (time_ms,iso_time,o,h,l,c,tick_volume,spread,real_volume)
   jsonl:path/to/file.jsonl  → one JSON object per line
-  parquet:path/...          → not implemented (use csv or jsonl)
-  -                         → JSONL to stdout`,
+  -                         → JSONL to stdout
+
+Parquet output is not implemented in v1 — use csv or jsonl, or convert
+downstream with pandas / pyarrow.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if symbol == "" {
 				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--symbol is required")}
@@ -79,11 +81,15 @@ func newBarsCopyCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
 			rows, err := db.QueryContext(cmd.Context(), fmt.Sprintf(
 				`SELECT time_ms, o, h, l, c, COALESCE(tick_volume,0), COALESCE(spread,0), COALESCE(real_volume,0)
-				 FROM bars_%s WHERE symbol = ? AND time_ms BETWEEN ? AND ?
-				 ORDER BY time_ms ASC`, tf), symbol, fromT.UnixMilli(), toT.UnixMilli())
+				 FROM bars_%s WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ?
+				 ORDER BY time_ms ASC`, tf), acct, symbol, fromT.UnixMilli(), toT.UnixMilli())
 			if err != nil {
 				return err
 			}
@@ -143,9 +149,13 @@ func newBarsExportCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
 			// Resolve symbols from the symbols table using the globs.
-			resolved, err := resolveSymbolsByGlob(cmd.Context(), db, symbols)
+			resolved, err := resolveSymbolsByGlob(cmd.Context(), db, acct, symbols)
 			if err != nil {
 				return err
 			}
@@ -169,8 +179,8 @@ func newBarsExportCmd() *cobra.Command {
 				}
 				rows, err := db.QueryContext(cmd.Context(), fmt.Sprintf(
 					`SELECT time_ms, o, h, l, c, COALESCE(tick_volume,0), COALESCE(spread,0), COALESCE(real_volume,0)
-					 FROM bars_%s WHERE symbol = ? AND time_ms BETWEEN ? AND ?
-					 ORDER BY time_ms ASC`, tf), sym, fromT.UnixMilli(), toMS)
+					 FROM bars_%s WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ?
+					 ORDER BY time_ms ASC`, tf), acct, sym, fromT.UnixMilli(), toMS)
 				if err != nil {
 					f.Close()
 					return err
@@ -234,12 +244,16 @@ func newTicksCopyCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
 			rows, err := db.QueryContext(cmd.Context(),
 				`SELECT time_ms, COALESCE(bid,0), COALESCE(ask,0), COALESCE(last,0),
 				        COALESCE(volume_real,0), COALESCE(flags,0)
-				 FROM ticks WHERE symbol = ? AND time_ms BETWEEN ? AND ?
-				 ORDER BY time_ms ASC`, symbol, fromT.UnixMilli(), toT.UnixMilli())
+				 FROM ticks WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ?
+				 ORDER BY time_ms ASC`, acct, symbol, fromT.UnixMilli(), toT.UnixMilli())
 			if err != nil {
 				return err
 			}
@@ -412,8 +426,9 @@ func writeTicks(w io.Writer, format string, rows *sql.Rows) (int, error) {
 
 // resolveSymbolsByGlob expands a comma-separated glob list against the symbols
 // table. "*" means all symbols. Globs use simple star semantics.
-func resolveSymbolsByGlob(ctx context.Context, db *sql.DB, globs string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT symbol FROM symbols ORDER BY symbol`)
+func resolveSymbolsByGlob(ctx context.Context, db *sql.DB, acct int64, globs string) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT DISTINCT symbol FROM symbols WHERE account_login = ? ORDER BY symbol`, acct)
 	if err != nil {
 		return nil, err
 	}
@@ -518,8 +533,12 @@ Upserts into the 'features' table keyed by (symbol, tf, time_ms).`,
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
-			n, err := buildFeatures(cmd.Context(), db, symbol, tf,
+			n, err := buildFeatures(cmd.Context(), db, acct, symbol, tf,
 				fromT.UnixMilli(), toT.UnixMilli(), atrPeriod, rsiPeriod, rvWindow)
 			if err != nil {
 				return err
@@ -545,12 +564,12 @@ Upserts into the 'features' table keyed by (symbol, tf, time_ms).`,
 	return cmd
 }
 
-func buildFeatures(ctx context.Context, db *sql.DB, symbol, tf string, fromMS, toMS int64,
+func buildFeatures(ctx context.Context, db *sql.DB, acct int64, symbol, tf string, fromMS, toMS int64,
 	atrPeriod, rsiPeriod, rvWindow int) (int, error) {
 
 	q := fmt.Sprintf(`SELECT time_ms, o, h, l, c FROM bars_%s
-		WHERE symbol = ? AND time_ms BETWEEN ? AND ? ORDER BY time_ms ASC`, tf)
-	rows, err := db.QueryContext(ctx, q, symbol, fromMS, toMS)
+		WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ? ORDER BY time_ms ASC`, tf)
+	rows, err := db.QueryContext(ctx, q, acct, symbol, fromMS, toMS)
 	if err != nil {
 		return 0, err
 	}
@@ -892,6 +911,10 @@ the mirror has the relevant data.`,
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
 			w := bufio.NewWriter(cmd.OutOrStdout())
 			defer w.Flush()
@@ -901,13 +924,13 @@ the mirror has the relevant data.`,
 				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--granularity must be 'tick' or 'bar:<TF>'")}
 			}
 			if isTick {
-				return replayTicks(cmd.Context(), db, w, symbol, fromT.UnixMilli(), toT.UnixMilli(), mult)
+				return replayTicks(cmd.Context(), db, w, acct, symbol, fromT.UnixMilli(), toT.UnixMilli(), mult)
 			}
 			tf := strings.ToUpper(strings.TrimPrefix(granularity, "bar:"))
 			if !quantAllowedTFs[tf] {
 				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--granularity bar:%s not in allowed TFs", tf)}
 			}
-			return replayBars(cmd.Context(), db, w, symbol, tf, fromT.UnixMilli(), toT.UnixMilli(), mult)
+			return replayBars(cmd.Context(), db, w, acct, symbol, tf, fromT.UnixMilli(), toT.UnixMilli(), mult)
 		},
 	}
 	cmd.Flags().StringVar(&symbol, "symbol", "", "Symbol (required)")
@@ -935,11 +958,11 @@ func parseSpeed(s string) (float64, error) {
 	return f, nil
 }
 
-func replayTicks(ctx context.Context, db *sql.DB, w *bufio.Writer, symbol string, fromMS, toMS int64, speed float64) error {
+func replayTicks(ctx context.Context, db *sql.DB, w *bufio.Writer, acct int64, symbol string, fromMS, toMS int64, speed float64) error {
 	rows, err := db.QueryContext(ctx,
 		`SELECT time_ms, bid, ask, COALESCE(last,0), COALESCE(volume_real,0), COALESCE(flags,0)
-		 FROM ticks WHERE symbol = ? AND time_ms BETWEEN ? AND ?
-		 ORDER BY time_ms ASC`, symbol, fromMS, toMS)
+		 FROM ticks WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ?
+		 ORDER BY time_ms ASC`, acct, symbol, fromMS, toMS)
 	if err != nil {
 		return err
 	}
@@ -986,11 +1009,11 @@ func replayTicks(ctx context.Context, db *sql.DB, w *bufio.Writer, symbol string
 	return nil
 }
 
-func replayBars(ctx context.Context, db *sql.DB, w *bufio.Writer, symbol, tf string, fromMS, toMS int64, speed float64) error {
+func replayBars(ctx context.Context, db *sql.DB, w *bufio.Writer, acct int64, symbol, tf string, fromMS, toMS int64, speed float64) error {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(
 		`SELECT time_ms, o, h, l, c, COALESCE(tick_volume,0), COALESCE(spread,0), COALESCE(real_volume,0)
-		 FROM bars_%s WHERE symbol = ? AND time_ms BETWEEN ? AND ?
-		 ORDER BY time_ms ASC`, tf), symbol, fromMS, toMS)
+		 FROM bars_%s WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ?
+		 ORDER BY time_ms ASC`, tf), acct, symbol, fromMS, toMS)
 	if err != nil {
 		return err
 	}
@@ -1101,8 +1124,12 @@ stores params_json + metrics_json so you can rebuild equity curves later.`,
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
-			res, err := runSMACrossBacktest(cmd.Context(), db,
+			res, err := runSMACrossBacktest(cmd.Context(), db, acct,
 				symbol, tf, fromT.UnixMilli(), toT.UnixMilli(),
 				deposit, costPerTrade, fastN, slowN)
 			if err != nil {
@@ -1246,12 +1273,12 @@ type BacktestResult struct {
 // equity curve is dimensionless × deposit; this is a teaching backtest, not
 // a sizing engine).
 func runSMACrossBacktest(ctx context.Context, db *sql.DB,
-	symbol, tf string, fromMS, toMS int64, deposit, costPerTrade float64,
+	acct int64, symbol, tf string, fromMS, toMS int64, deposit, costPerTrade float64,
 	fastN, slowN int) (*BacktestResult, error) {
 
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(
-		`SELECT time_ms, c FROM bars_%s WHERE symbol = ? AND time_ms BETWEEN ? AND ?
-		 ORDER BY time_ms ASC`, tf), symbol, fromMS, toMS)
+		`SELECT time_ms, c FROM bars_%s WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ?
+		 ORDER BY time_ms ASC`, tf), acct, symbol, fromMS, toMS)
 	if err != nil {
 		return nil, err
 	}

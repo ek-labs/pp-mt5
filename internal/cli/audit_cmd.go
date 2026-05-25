@@ -28,10 +28,16 @@ func newAuditCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 			rows, err := db.QueryContext(cmd.Context(), `
 				SELECT time_ms, command, hash, confirmed, mode, account_login,
 				       COALESCE(error,''), COALESCE(response,'')
-				FROM audit ORDER BY time_ms DESC LIMIT ?`, limit)
+				FROM audit
+				WHERE account_login = ? OR account_login IS NULL
+				ORDER BY time_ms DESC LIMIT ?`, acct, limit)
 			if err != nil {
 				return err
 			}

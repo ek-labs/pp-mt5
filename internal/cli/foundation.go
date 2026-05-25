@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/bridge"
+	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/config"
 	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/safety"
 	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/store"
 )
@@ -31,6 +33,100 @@ func defaultInit(timeoutMs int) bridge.InitializeOptions {
 		o.Path = p
 	}
 	return o
+}
+
+// profileInit returns InitializeOptions for the requested --profile, or
+// defaultInit if no profile is set. The profile's password is read from the
+// env var named in its password_env field — never stored on disk.
+//
+// Errors are returned as ExitConfig so the caller can surface them with the
+// right exit code.
+func profileInit(cmd *cobra.Command, timeoutMs int) (bridge.InitializeOptions, error) {
+	name, _ := cmd.Flags().GetString("profile")
+	if name == "" {
+		return defaultInit(timeoutMs), nil
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return bridge.InitializeOptions{}, &ExitErr{Code: ExitConfig, Err: fmt.Errorf("--profile %q: %w", name, err)}
+	}
+	p, ok := cfg.Profiles[name]
+	if !ok {
+		available := make([]string, 0, len(cfg.Profiles))
+		for k := range cfg.Profiles {
+			available = append(available, k)
+		}
+		sort.Strings(available)
+		hint := "(no profiles defined — run `pp-mt5 config-init` to scaffold a config.toml)"
+		if len(available) > 0 {
+			hint = fmt.Sprintf("(available: %s)", strings.Join(available, ", "))
+		}
+		return bridge.InitializeOptions{}, &ExitErr{
+			Code: ExitConfig,
+			Err:  fmt.Errorf("--profile %q not found %s", name, hint),
+		}
+	}
+	if p.PasswordEnv == "" {
+		return bridge.InitializeOptions{}, &ExitErr{
+			Code: ExitConfig,
+			Err:  fmt.Errorf("--profile %q has no password_env — add one to %s", name, config.DefaultPath()),
+		}
+	}
+	password := os.Getenv(p.PasswordEnv)
+	if password == "" {
+		return bridge.InitializeOptions{}, &ExitErr{
+			Code: ExitConfig,
+			Err:  fmt.Errorf("--profile %q: env var %q is empty (set it before invoking)", name, p.PasswordEnv),
+		}
+	}
+	opts := defaultInit(timeoutMs)
+	opts.Login = p.Account
+	opts.Server = p.Server
+	opts.Password = password
+	return opts, nil
+}
+
+// resolveAccountLogin returns the account_login that mirror reads should
+// scope to. Resolution order:
+//
+//  1. --account <N> flag (explicit override; user knows what they want)
+//  2. Most recently synced row in the accounts table (last_synced DESC)
+//
+// If neither yields a value, returns a clean ExitConfig error pointing at
+// 'pp-mt5 sync all' as the remediation. Read commands SHOULD scope to the
+// resolved value because the mirror is multi-account-aware (the schema keys
+// on account_login) — unscoped reads silently mix data across logins.
+func resolveAccountLogin(ctx context.Context, db *sql.DB, cmd *cobra.Command) (int64, error) {
+	if v, _ := cmd.Flags().GetInt64("account"); v != 0 {
+		return v, nil
+	}
+	var login int64
+	err := db.QueryRowContext(ctx,
+		`SELECT login FROM accounts ORDER BY last_synced DESC LIMIT 1`).Scan(&login)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, &ExitErr{Code: ExitConfig, Err: fmt.Errorf(
+				"no accounts in the local mirror — run `pp-mt5 sync all` first, or pass --account <login>")}
+		}
+		return 0, err
+	}
+	return login, nil
+}
+
+// initBridge resolves --profile, initializes the bridge, and maps bridge
+// sentinels to their documented exit codes. Used by every command that takes
+// the read-only "attach to the current terminal" path except doctor (which
+// runs its own structured remediation) and connect login/logout (which manage
+// their own auth flow).
+func initBridge(cmd *cobra.Command, b *bridge.Bridge, timeoutMs int) error {
+	opts, err := profileInit(cmd, timeoutMs)
+	if err != nil {
+		return err
+	}
+	if err := b.Initialize(opts); err != nil {
+		return mapBridgeErr(err)
+	}
+	return nil
 }
 
 // terminalPathFromEnv resolves MT5_PATH to an absolute terminal64.exe path,
@@ -181,10 +277,47 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		results = append(results, checkResult{Name: "store.db writable", Status: "pass", Detail: dbPath})
 	}
 
-	// 8. safety mode (informational)
+	// 8. safety mode + config sanity. The mode string is informational; the
+	// kill switch and config-load are real fails because they block every
+	// write — surfacing them in doctor catches the case where the user
+	// forgot a touched kill-switch file or has a malformed config.
 	results = append(results, checkResult{
 		Name: "safety mode", Status: "pass", Detail: safety.ModeDescription(),
 	})
+	cfg, cfgErr := config.Load("")
+	switch {
+	case cfgErr != nil:
+		results = append(results, checkResult{
+			Name: "config.toml", Status: "fail", Detail: cfgErr.Error(),
+			Remediate: "Fix or remove the file at " + config.DefaultPath() + " — or run `pp-mt5 config-init` to regenerate it",
+		})
+	case cfg == nil:
+		// No config file. Acceptable — guardrails default to off.
+		results = append(results, checkResult{
+			Name: "config.toml", Status: "skip", Detail: "not present (guardrails default to off)",
+		})
+	default:
+		results = append(results, checkResult{
+			Name: "config.toml", Status: "pass",
+			Detail: fmt.Sprintf("max_volume=%g max_positions=%d max_daily_loss=%g kill_switch=%q",
+				cfg.Guardrails.MaxVolumePerOrder, cfg.Guardrails.MaxOpenPositions,
+				cfg.Guardrails.MaxDailyLoss, cfg.Guardrails.KillSwitchFile),
+		})
+	}
+	if cfg != nil && cfg.Guardrails.KillSwitchFile != "" {
+		if _, err := os.Stat(cfg.Guardrails.KillSwitchFile); err == nil {
+			results = append(results, checkResult{
+				Name: "kill switch", Status: "fail",
+				Detail:    "file is present — every write will be refused",
+				Remediate: "Delete " + cfg.Guardrails.KillSwitchFile + " to re-enable writes",
+			})
+		} else {
+			results = append(results, checkResult{
+				Name: "kill switch", Status: "pass",
+				Detail: "not present (writes allowed past gate)",
+			})
+		}
+	}
 
 	// emit
 	if jsonFlag(cmd) {
@@ -316,6 +449,9 @@ func newConnectLogoutCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
+			// logout intentionally uses defaultInit — it attaches to whatever
+			// the terminal has and shuts the bridge down. --profile would be
+			// confusing here (you don't 'log out of' a profile).
 			if err := b.Initialize(defaultInit(5000)); err != nil {
 				return mapBridgeErr(err)
 			}
@@ -338,8 +474,8 @@ func newConnectStatusCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(5000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 5000); err != nil {
+				return err
 			}
 			acc, err := b.AccountInfo()
 			if err != nil {
@@ -370,8 +506,8 @@ func newAccountCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			acc, err := b.AccountInfo()
 			if err != nil {
@@ -394,8 +530,8 @@ func newTerminalCmd() *cobra.Command {
 				return err
 			}
 			defer b.Close()
-			if err := b.Initialize(defaultInit(10000)); err != nil {
-				return mapBridgeErr(err)
+			if err := initBridge(cmd, b, 10000); err != nil {
+				return err
 			}
 			term, err := b.TerminalInfo()
 			if err != nil {
@@ -772,9 +908,9 @@ func openBridgeAndStore(cmd *cobra.Command) (*bridge.Bridge, *sql.DB, *bridge.Ac
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if err := b.Initialize(defaultInit(10000)); err != nil {
+	if err := initBridge(cmd, b, 10000); err != nil {
 		_ = b.Close()
-		return nil, nil, nil, mapBridgeErr(err)
+		return nil, nil, nil, err
 	}
 	acc, err := b.AccountInfo()
 	if err != nil {

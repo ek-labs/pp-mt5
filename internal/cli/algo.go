@@ -44,9 +44,13 @@ func newHistoryDealsCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
-			q := "SELECT ticket, time_ms, symbol, type, entry, volume, price, profit, commission, swap, fee, magic, position_id, comment FROM deals WHERE time_ms BETWEEN ? AND ?"
-			args2 := []any{fromT.UnixMilli(), toT.UnixMilli()}
+			q := "SELECT ticket, time_ms, symbol, type, entry, volume, price, profit, commission, swap, fee, magic, position_id, comment FROM deals WHERE account_login = ? AND time_ms BETWEEN ? AND ?"
+			args2 := []any{acct, fromT.UnixMilli(), toT.UnixMilli()}
 			if symbol != "" {
 				q += " AND symbol = ?"
 				args2 = append(args2, symbol)
@@ -133,8 +137,12 @@ func newHistoryOrdersCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
-			q := "SELECT ticket, time_setup_ms, time_done_ms, symbol, type, state, volume_initial, price_open, sl, tp, magic, comment FROM history_orders WHERE time_setup_ms BETWEEN ? AND ?"
-			args2 := []any{fromT.UnixMilli(), toT.UnixMilli()}
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			q := "SELECT ticket, time_setup_ms, time_done_ms, symbol, type, state, volume_initial, price_open, sl, tp, magic, comment FROM history_orders WHERE account_login = ? AND time_setup_ms BETWEEN ? AND ?"
+			args2 := []any{acct, fromT.UnixMilli(), toT.UnixMilli()}
 			if symbol != "" {
 				q += " AND symbol = ?"
 				args2 = append(args2, symbol)
@@ -233,7 +241,11 @@ Per-position P&L = sum(profit + commission + swap + fee) across all its deals.`,
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
-			s, err := computeStatsSummary(cmd.Context(), db, fromT.UnixMilli(), time.Now().UnixMilli())
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			s, err := computeStatsSummary(cmd.Context(), db, acct, fromT.UnixMilli(), time.Now().UnixMilli())
 			if err != nil {
 				return err
 			}
@@ -271,7 +283,7 @@ type StatsSummary struct {
 	TradingDays    int     `json:"trading_days"`
 }
 
-func computeStatsSummary(ctx context.Context, db *sql.DB, fromMS, toMS int64) (*StatsSummary, error) {
+func computeStatsSummary(ctx context.Context, db *sql.DB, acct, fromMS, toMS int64) (*StatsSummary, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 		  position_id,
@@ -280,12 +292,12 @@ func computeStatsSummary(ctx context.Context, db *sql.DB, fromMS, toMS int64) (*
 		  SUM(profit + commission + swap + fee) AS pnl,
 		  SUM(CASE WHEN entry='out' THEN 1 ELSE 0 END) AS outs
 		FROM deals
-		WHERE time_ms BETWEEN ? AND ?
+		WHERE account_login = ? AND time_ms BETWEEN ? AND ?
 		  AND position_id <> 0
 		GROUP BY position_id
 		HAVING outs > 0
 		ORDER BY last_time ASC
-	`, fromMS, toMS)
+	`, acct, fromMS, toMS)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +511,11 @@ func newStatsBy(use, groupExpr, label string) *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
-			rows, err := computeStatsBy(cmd.Context(), db, fromT.UnixMilli(), time.Now().UnixMilli(), groupExpr)
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			rows, err := computeStatsBy(cmd.Context(), db, acct, fromT.UnixMilli(), time.Now().UnixMilli(), groupExpr)
 			if err != nil {
 				return err
 			}
@@ -510,7 +526,7 @@ func newStatsBy(use, groupExpr, label string) *cobra.Command {
 	return cmd
 }
 
-func computeStatsBy(ctx context.Context, db *sql.DB, fromMS, toMS int64, groupExpr string) ([]GroupedStatsRow, error) {
+func computeStatsBy(ctx context.Context, db *sql.DB, acct, fromMS, toMS int64, groupExpr string) ([]GroupedStatsRow, error) {
 	q := fmt.Sprintf(`
 		WITH positions_pnl AS (
 		  SELECT
@@ -520,7 +536,7 @@ func computeStatsBy(ctx context.Context, db *sql.DB, fromMS, toMS int64, groupEx
 		    MAX(time_ms)  AS last_ms,
 		    SUM(profit + commission + swap + fee) AS pnl
 		  FROM deals
-		  WHERE time_ms BETWEEN ? AND ? AND position_id <> 0
+		  WHERE account_login = ? AND time_ms BETWEEN ? AND ? AND position_id <> 0
 		  GROUP BY position_id
 		  HAVING SUM(CASE WHEN entry='out' THEN 1 ELSE 0 END) > 0
 		)
@@ -539,7 +555,7 @@ func computeStatsBy(ctx context.Context, db *sql.DB, fromMS, toMS int64, groupEx
 		GROUP BY k
 		ORDER BY net DESC
 	`, groupExpr)
-	rows, err := db.QueryContext(ctx, q, fromMS, toMS)
+	rows, err := db.QueryContext(ctx, q, acct, fromMS, toMS)
 	if err != nil {
 		return nil, err
 	}
@@ -606,7 +622,11 @@ func newStatsStreaksCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
-			trades, err := loadTradeTimeline(cmd.Context(), db, fromT.UnixMilli(), time.Now().UnixMilli())
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			trades, err := loadTradeTimeline(cmd.Context(), db, acct, fromT.UnixMilli(), time.Now().UnixMilli())
 			if err != nil {
 				return err
 			}
@@ -645,7 +665,7 @@ type tradeRow struct {
 	Magic     int64
 }
 
-func loadTradeTimeline(ctx context.Context, db *sql.DB, fromMS, toMS int64) ([]tradeRow, error) {
+func loadTradeTimeline(ctx context.Context, db *sql.DB, acct, fromMS, toMS int64) ([]tradeRow, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT position_id,
 		       MAX(time_ms) AS last_ms,
@@ -653,11 +673,11 @@ func loadTradeTimeline(ctx context.Context, db *sql.DB, fromMS, toMS int64) ([]t
 		       MAX(symbol) AS symbol,
 		       MAX(magic) AS magic
 		FROM deals
-		WHERE time_ms BETWEEN ? AND ? AND position_id <> 0
+		WHERE account_login = ? AND time_ms BETWEEN ? AND ? AND position_id <> 0
 		GROUP BY position_id
 		HAVING SUM(CASE WHEN entry='out' THEN 1 ELSE 0 END) > 0
 		ORDER BY last_ms ASC
-	`, fromMS, toMS)
+	`, acct, fromMS, toMS)
 	if err != nil {
 		return nil, err
 	}
@@ -817,7 +837,11 @@ func newStatsDrawdownCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
-			trades, err := loadTradeTimeline(cmd.Context(), db, fromT.UnixMilli(), time.Now().UnixMilli())
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			trades, err := loadTradeTimeline(cmd.Context(), db, acct, fromT.UnixMilli(), time.Now().UnixMilli())
 			if err != nil {
 				return err
 			}
@@ -1006,7 +1030,11 @@ Output:
 				_ = db.QueryRowContext(cmd.Context(),
 					"SELECT COALESCE(MAX(login),0) FROM accounts").Scan(new(int64))
 			}
-			out, err := computeRMultiples(cmd.Context(), db, fromT.UnixMilli(), time.Now().UnixMilli(), riskPerTrade, balance)
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			out, err := computeRMultiples(cmd.Context(), db, acct, fromT.UnixMilli(), time.Now().UnixMilli(), riskPerTrade, balance)
 			if err != nil {
 				return err
 			}
@@ -1041,7 +1069,7 @@ type RMultiplesOut struct {
 	FallbackCount int         `json:"fallback_count"`
 }
 
-func computeRMultiples(ctx context.Context, db *sql.DB, fromMS, toMS int64, riskPct, fallbackBalance float64) (*RMultiplesOut, error) {
+func computeRMultiples(ctx context.Context, db *sql.DB, acct, fromMS, toMS int64, riskPct, fallbackBalance float64) (*RMultiplesOut, error) {
 	// One join: per closed position, the entry deal's order ticket → history_orders SL.
 	rows, err := db.QueryContext(ctx, `
 		WITH per_pos AS (
@@ -1052,7 +1080,7 @@ func computeRMultiples(ctx context.Context, db *sql.DB, fromMS, toMS int64, risk
 		    SUM(profit + commission + swap + fee) AS pnl,
 		    MAX(CASE WHEN entry='in' THEN order_ticket END) AS entry_order
 		  FROM deals
-		  WHERE time_ms BETWEEN ? AND ? AND position_id <> 0
+		  WHERE account_login = ? AND time_ms BETWEEN ? AND ? AND position_id <> 0
 		  GROUP BY position_id
 		  HAVING SUM(CASE WHEN entry='out' THEN 1 ELSE 0 END) > 0
 		)
@@ -1063,10 +1091,10 @@ func computeRMultiples(ctx context.Context, db *sql.DB, fromMS, toMS int64, risk
 		  COALESCE(o.volume_initial, 0) AS volume,
 		  COALESCE(s.contract_size, 0)  AS contract_size
 		FROM per_pos p
-		LEFT JOIN history_orders o ON o.ticket = p.entry_order
-		LEFT JOIN symbols       s ON s.symbol = p.symbol
+		LEFT JOIN history_orders o ON o.ticket = p.entry_order AND o.account_login = ?
+		LEFT JOIN symbols       s ON s.symbol = p.symbol      AND s.account_login = ?
 		ORDER BY p.last_ms ASC
-	`, fromMS, toMS)
+	`, acct, fromMS, toMS, acct, acct)
 	if err != nil {
 		return nil, err
 	}
@@ -1199,7 +1227,11 @@ Bars are intersected by timestamp; missing bars in any series drop that timestam
 			}
 			defer db.Close()
 
-			out, err := computeCorrelation(cmd.Context(), db, symbols, tf, fromT.UnixMilli(), time.Now().UnixMilli())
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			out, err := computeCorrelation(cmd.Context(), db, acct, symbols, tf, fromT.UnixMilli(), time.Now().UnixMilli())
 			if err != nil {
 				return err
 			}
@@ -1219,7 +1251,7 @@ type CorrelationOut struct {
 	Matrix  [][]float64 `json:"matrix"`
 }
 
-func computeCorrelation(ctx context.Context, db *sql.DB, symbols []string, tf string, fromMS, toMS int64) (*CorrelationOut, error) {
+func computeCorrelation(ctx context.Context, db *sql.DB, acct int64, symbols []string, tf string, fromMS, toMS int64) (*CorrelationOut, error) {
 	allowedTFs := map[string]bool{
 		"M1": true, "M5": true, "M15": true, "M30": true,
 		"H1": true, "H4": true, "D1": true, "W1": true, "MN1": true,
@@ -1232,8 +1264,8 @@ func computeCorrelation(ctx context.Context, db *sql.DB, symbols []string, tf st
 	// Load closes per symbol keyed by time_ms.
 	series := make([]map[int64]float64, len(symbols))
 	for i, sym := range symbols {
-		q := fmt.Sprintf(`SELECT time_ms, c FROM %s WHERE symbol = ? AND time_ms BETWEEN ? AND ? ORDER BY time_ms ASC`, table)
-		rows, err := db.QueryContext(ctx, q, sym, fromMS, toMS)
+		q := fmt.Sprintf(`SELECT time_ms, c FROM %s WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ? ORDER BY time_ms ASC`, table)
+		rows, err := db.QueryContext(ctx, q, acct, sym, fromMS, toMS)
 		if err != nil {
 			return nil, err
 		}
@@ -1399,7 +1431,11 @@ func newMagicCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
-			out, err := computeMagicAudit(cmd.Context(), db, fromT.UnixMilli(), time.Now().UnixMilli(), deadDays)
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
+			out, err := computeMagicAudit(cmd.Context(), db, acct, fromT.UnixMilli(), time.Now().UnixMilli(), deadDays)
 			if err != nil {
 				return err
 			}
@@ -1424,14 +1460,14 @@ type MagicRow struct {
 	Runaway    bool    `json:"runaway"` // recent rolling P&L sharply negative
 }
 
-func computeMagicAudit(ctx context.Context, db *sql.DB, fromMS, toMS int64, deadDays int) ([]MagicRow, error) {
+func computeMagicAudit(ctx context.Context, db *sql.DB, acct, fromMS, toMS int64, deadDays int) ([]MagicRow, error) {
 	rows, err := db.QueryContext(ctx, `
 		WITH per_pos AS (
 		  SELECT
 		    position_id, MAX(magic) AS magic, MAX(time_ms) AS last_ms,
 		    SUM(profit + commission + swap + fee) AS pnl
 		  FROM deals
-		  WHERE time_ms BETWEEN ? AND ? AND position_id <> 0
+		  WHERE account_login = ? AND time_ms BETWEEN ? AND ? AND position_id <> 0
 		  GROUP BY position_id
 		  HAVING SUM(CASE WHEN entry='out' THEN 1 ELSE 0 END) > 0
 		)
@@ -1445,7 +1481,7 @@ func computeMagicAudit(ctx context.Context, db *sql.DB, fromMS, toMS int64, dead
 		FROM per_pos
 		GROUP BY magic
 		ORDER BY net DESC
-	`, fromMS, toMS)
+	`, acct, fromMS, toMS)
 	if err != nil {
 		return nil, err
 	}
@@ -1479,12 +1515,12 @@ func computeMagicAudit(ctx context.Context, db *sql.DB, fromMS, toMS int64, dead
 		WITH per_pos AS (
 		  SELECT position_id, MAX(magic) AS magic, MAX(time_ms) AS last_ms,
 		         SUM(profit + commission + swap + fee) AS pnl
-		  FROM deals WHERE time_ms >= ? AND position_id <> 0
+		  FROM deals WHERE account_login = ? AND time_ms >= ? AND position_id <> 0
 		  GROUP BY position_id
 		  HAVING SUM(CASE WHEN entry='out' THEN 1 ELSE 0 END) > 0
 		)
 		SELECT magic, SUM(pnl) FROM per_pos GROUP BY magic ORDER BY 2 ASC LIMIT 5
-	`, cutoff)
+	`, acct, cutoff)
 	if err == nil {
 		defer rrows.Close()
 		for rrows.Next() {

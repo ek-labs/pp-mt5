@@ -52,7 +52,7 @@ If `doctor` reports anything red, fix it before invoking any other command — i
 Every write command is dry-run by default:
 
 1. First invocation prints a SHA-256 of the canonical request and exits **6** (safety-rejected).
-2. Re-invoke with `--confirm <hash>` within **60 seconds**. The window is the rolling 60s bucket, not from-when-you-printed.
+2. Re-invoke with `--confirm <hash>` within **60–120 seconds**. The window is the current and previous 60s bucket, so the exact validity depends on when you got the hash.
 3. Live writes additionally require **`MT5_LIVE=1`** in env **AND** **`--i-understand-this-is-live`** on the command. Missing either → exit 6.
 4. A kill switch file (`kill_switch_file` in `~/.config/pp-mt5/config.toml`) — if present — rejects every write unconditionally.
 
