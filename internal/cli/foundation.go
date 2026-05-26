@@ -891,7 +891,7 @@ Read-only by default — INSERT/UPDATE/DELETE/DROP/ALTER require --write.`,
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
-			return runSQL(cmd, db, query)
+			return runSQL(cmd, db, query, allowWrite)
 		},
 	}
 	cmd.Flags().BoolVar(&allowWrite, "write", false, "Allow INSERT/UPDATE/DELETE/DROP/ALTER statements")
@@ -1003,9 +1003,17 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 	return 0, fmt.Errorf("unknown unit %q", unit)
 }
 
+// looksLikeWrite is a fast UX guard. The real gate against writes on a
+// read-only connection is store.OpenReadOnly (mode=ro + query_only=1), which
+// rejects writes at the SQLite engine level. This heuristic just lets us
+// emit a clearer "use --write" message before the engine error reaches the
+// user. Note: PRAGMA is intentionally NOT in the list because read-only
+// PRAGMAs (table_info, database_list, schema_version, ...) are legitimate
+// SELECTs in disguise; write-PRAGMAs (journal_mode = wal, foreign_keys =
+// 0) fail at the engine on an RO connection.
 func looksLikeWrite(q string) bool {
 	first := strings.ToUpper(strings.TrimSpace(q))
-	for _, kw := range []string{"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE", "TRUNCATE", "PRAGMA"} {
+	for _, kw := range []string{"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE", "TRUNCATE"} {
 		if strings.HasPrefix(first, kw) {
 			return true
 		}
@@ -1013,8 +1021,12 @@ func looksLikeWrite(q string) bool {
 	return false
 }
 
-func runSQL(cmd *cobra.Command, db *sql.DB, query string) error {
-	if looksLikeWrite(query) {
+// runSQL executes a SELECT (and PRAGMA, and EXPLAIN) through QueryContext, or
+// a DML/DDL statement through ExecContext. Pass writable=true only when the
+// caller opened the DB read-write; on an RO connection, always use the Query
+// path because Exec would silently swallow rows from PRAGMA-style reads.
+func runSQL(cmd *cobra.Command, db *sql.DB, query string, writable bool) error {
+	if writable && looksLikeWrite(query) {
 		res, err := db.ExecContext(cmd.Context(), query)
 		if err != nil {
 			return &ExitErr{Code: ExitConfig, Err: err}

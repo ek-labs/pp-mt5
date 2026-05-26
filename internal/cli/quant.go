@@ -95,7 +95,7 @@ downstream with pandas / pyarrow.`,
 			}
 			defer rows.Close()
 
-			w, closer, format, err := openSink(out, fmt.Sprintf("bars_%s_%s", symbol, tf))
+			w, closer, format, err := openSink(out)
 			if err != nil {
 				return &ExitErr{Code: ExitUsage, Err: err}
 			}
@@ -259,7 +259,7 @@ func newTicksCopyCmd() *cobra.Command {
 			}
 			defer rows.Close()
 
-			w, closer, format, err := openSink(out, fmt.Sprintf("ticks_%s", symbol))
+			w, closer, format, err := openSink(out)
 			if err != nil {
 				return &ExitErr{Code: ExitUsage, Err: err}
 			}
@@ -288,8 +288,7 @@ func newTicksCopyCmd() *cobra.Command {
 //	"jsonl:path"        → file, jsonl
 //	"csv:path"          → file, csv
 //	"parquet:path"      → error (not implemented)
-func openSink(out, defaultStem string) (io.Writer, func(), string, error) {
-	_ = defaultStem
+func openSink(out string) (io.Writer, func(), string, error) {
 	if out == "" || out == "-" {
 		bw := bufio.NewWriter(os.Stdout)
 		return bw, func() { bw.Flush() }, "jsonl", nil

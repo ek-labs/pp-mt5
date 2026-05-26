@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -571,9 +572,10 @@ func newPositionCmd() *cobra.Command {
 			}
 			volume := pos.Volume
 			if partial > 0 && partial < 1 {
-				volume = roundLot(pos.Volume*partial, 2)
+				step := lookupVolumeStep(cmd.Context(), db, acc.Login, pos.Symbol)
+				volume = roundLot(pos.Volume*partial, step)
 				if volume == 0 {
-					return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("partial=%g rounds to 0 lots", partial)}
+					return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("partial=%g rounds to 0 lots (volume_step=%g)", partial, step)}
 				}
 			}
 			req := buildCloseRequest(pos, volume)
@@ -661,13 +663,27 @@ Examples:
 			defer b.Close()
 			defer db.Close()
 
+			// Validate the filter before it touches the SQL engine. The
+			// driver blocks multi-statement injection (verified empirically
+			// against modernc.org/sqlite), but a filter with comments or
+			// statement separators is almost certainly a mistake or attack
+			// and we'd rather reject than guess. UNION etc. is still
+			// possible — the safety hash binds tickets+filter so a UI lie
+			// would surface in the dry-run table.
+			if err := validateCloseAllFilter(filter); err != nil {
+				return &ExitErr{Code: ExitUsage, Err: err}
+			}
+
 			// Step 1: snapshot positions into the mirror so the filter has data.
 			if _, err := store.SyncPositions(cmd.Context(), db, b, acc.Login); err != nil {
 				return mapBridgeErr(err)
 			}
-			// Step 2: resolve the filter to a ticket list.
+			// Step 2: resolve the filter to a ticket list. ORDER BY ticket
+			// is load-bearing: without it, SQLite's row order can vary
+			// between dry-run and confirm (e.g., when sync inserts a new
+			// position), which would invalidate the user's hash.
 			rows, err := db.QueryContext(cmd.Context(),
-				"SELECT ticket, symbol, type, volume, profit FROM positions WHERE account_login=? AND ("+filter+")",
+				"SELECT ticket, symbol, type, volume, profit FROM positions WHERE account_login=? AND ("+filter+") ORDER BY ticket ASC",
 				acc.Login)
 			if err != nil {
 				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("filter SQL: %w", err)}
@@ -731,7 +747,7 @@ Examples:
 			}
 			if !confirmed {
 				h := safety.CurrentHash(intent)
-				fmt.Fprintf(cmd.OutOrStdout(), "\nhash: %s  (60s window; covers tickets + filter, not live P&L)\n", h)
+				fmt.Fprintf(cmd.OutOrStdout(), "\nhash: %s  (60–120s bucketed window; covers tickets + filter, not live P&L)\n", h)
 				fmt.Fprintf(cmd.OutOrStdout(), "to execute:  pp-mt5 close all --filter %q --confirm %s%s\n",
 					filter, h, liveFlagsHint(acc.TradeMode))
 				ctx.auditDryRun(db, acc.Login, req, h)
@@ -857,7 +873,7 @@ func (w writeCtx) runOrderSend(b *bridge.Bridge, db *sql.DB, acc *bridge.Account
 	if !confirmed {
 		h := safety.CurrentHash(intent)
 		w.printDryRun(req)
-		fmt.Fprintf(w.cmd.OutOrStdout(), "hash: %s  (60s window; covers intent, not the live price)\n", h)
+		fmt.Fprintf(w.cmd.OutOrStdout(), "hash: %s  (60–120s bucketed window; covers intent, not the live price)\n", h)
 		fmt.Fprintf(w.cmd.OutOrStdout(), "to execute: re-run with  --confirm %s%s\n", h, liveFlagsHint(acc.TradeMode))
 		w.auditDryRun(db, acc.Login, req, h)
 		return &ExitErr{Code: ExitSafetyRejected, Err: fmt.Errorf("dry-run — pass --confirm to execute")}
@@ -976,10 +992,6 @@ func (w writeCtx) auditError(db *sql.DB, accLogin int64, req map[string]any, err
 	})
 }
 
-// Compile-time guard that hashableIntent stays compatible with auditDryRun
-// callers (which pass map[string]any directly).
-var _ = hashableIntent
-
 func modeStr() string {
 	if safety.CurrentMode() == safety.ModeLive {
 		return "live"
@@ -1034,7 +1046,11 @@ func buildCloseRequest(p *bridge.Position, volume float64) map[string]any {
 }
 
 func isOK(retcode int) bool {
-	return retcode == 10008 || retcode == 10009 // TRADE_RETCODE_PLACED / DONE
+	// PLACED / DONE / NO_CHANGES — the broker treats a no-op SLTP modify
+	// (price already matches) as 10025 NO_CHANGES, which is success from
+	// the user's perspective. Flagging it as broker rejection would noise
+	// up the audit log on idempotent modify calls.
+	return retcode == 10008 || retcode == 10009 || retcode == 10025
 }
 
 func retcodeName(rc int) string {
@@ -1043,6 +1059,8 @@ func retcodeName(rc int) string {
 		return "PLACED"
 	case 10009:
 		return "DONE"
+	case 10025:
+		return "NO_CHANGES"
 	case 10004:
 		return "REQUOTE"
 	case 10013:
@@ -1074,11 +1092,52 @@ func liveFlagsHint(tradeMode int) string {
 	return ""
 }
 
-// roundLot snaps a volume to the broker's lot step. For this CLI we approximate
-// with 2 decimal places, which matches every JustMarkets-style demo we've seen
-// and most retail brokers. A precise per-symbol round lives in Phase 9.
-func roundLot(v float64, _ int) float64 {
-	return math.Round(v*100) / 100
+// validateCloseAllFilter is a cheap syntactic guard on the --filter string.
+// We can't safely parameterize a SQL fragment (the user is supplying part of
+// the WHERE clause), but we can reject the patterns that have no legitimate
+// use in a WHERE expression — statement terminators and comments. The driver
+// already blocks multi-statement queries; this is defense in depth so the
+// dry-run UI can't be silently manipulated either.
+//
+// Inside a single-quoted string literal a `;` or `--` IS legal SQL — but a
+// filter that needs that level of complexity is past what we want to support
+// inline. Users with that need can fall back to `pp-mt5 sql` with --write.
+func validateCloseAllFilter(f string) error {
+	if strings.TrimSpace(f) == "" {
+		return fmt.Errorf("--filter is empty (use e.g. \"profit < 0\")")
+	}
+	for _, banned := range []string{";", "--", "/*", "*/"} {
+		if strings.Contains(f, banned) {
+			return fmt.Errorf("--filter contains %q which is not allowed (no statement separators or comments)", banned)
+		}
+	}
+	return nil
+}
+
+// roundLot snaps a volume to the broker's lot step. step is the symbol's
+// volume_step from the symbols table; pass 0 for the safe 0.01 fallback
+// (only when the symbol isn't in the mirror yet, e.g., user closing a
+// position on a symbol they never synced — should not happen in practice
+// because SyncPositions is called first).
+//
+// FX usually quotes 0.01, but XAU/indices/crypto can be 0.1 or 0.0001.
+// Hardcoding 0.01 silently rejected partial closes on those.
+func roundLot(v float64, step float64) float64 {
+	if step <= 0 {
+		step = 0.01
+	}
+	return math.Round(v/step) * step
+}
+
+// lookupVolumeStep reads the symbol's volume_step from the local mirror.
+// Returns 0 if the symbol isn't there (caller's roundLot will fall back).
+// Best-effort — never fails the calling write.
+func lookupVolumeStep(ctx context.Context, db *sql.DB, acct int64, symbol string) float64 {
+	var step float64
+	_ = db.QueryRowContext(ctx,
+		`SELECT volume_step FROM symbols WHERE account_login = ? AND symbol = ?`,
+		acct, symbol).Scan(&step)
+	return step
 }
 
 

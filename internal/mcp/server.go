@@ -605,9 +605,15 @@ func fmtF(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
+// looksLikeSQLWrite is a fast-path UX guard on the MCP mt5_sql tool. The
+// load-bearing gate is that dispatch routes mt5_sql to the CLI sql command
+// without --write, which opens store.OpenReadOnly (mode=ro + query_only).
+// We drop PRAGMA so read-only PRAGMAs (table_info, schema_version) and
+// pragma_table_info() table-valued functions stay accessible from the
+// agent — those have legitimate diagnostic uses.
 func looksLikeSQLWrite(q string) bool {
 	first := strings.ToUpper(strings.TrimSpace(q))
-	for _, kw := range []string{"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE", "TRUNCATE", "PRAGMA"} {
+	for _, kw := range []string{"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE", "TRUNCATE"} {
 		if strings.HasPrefix(first, kw) {
 			return true
 		}

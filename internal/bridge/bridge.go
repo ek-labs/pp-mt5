@@ -96,6 +96,12 @@ type Bridge struct {
 	closed  atomic.Bool
 	nextID  atomic.Int64
 	timeout time.Duration
+
+	// broken is set when we detect protocol desync (timeout, ID mismatch).
+	// Once broken, every subsequent Call errors fast — the caller must Close
+	// the bridge and start a new one rather than risk consuming a late
+	// response intended for the timed-out call.
+	broken atomic.Bool
 }
 
 type request struct {
@@ -179,6 +185,9 @@ func (b *Bridge) Call(method string, params any, out any) error {
 	if b.closed.Load() {
 		return errors.New("bridge: closed")
 	}
+	if b.broken.Load() {
+		return errors.New("bridge: marked broken after prior timeout or protocol desync — close this bridge and open a fresh one")
+	}
 	id := b.nextID.Add(1)
 	req := request{ID: id, Method: method, Params: params}
 
@@ -212,7 +221,14 @@ func (b *Bridge) Call(method string, params any, out any) error {
 		case r := <-ch:
 			line, err = r.line, r.err
 		case <-ctx.Done():
-			return fmt.Errorf("bridge: call %s timed out after %s", method, b.timeout)
+			// CRITICAL: the reader goroutine is still parked on ReadBytes.
+			// If we just returned here the next Call would spawn a second
+			// reader goroutine, and Python's late response to THIS call
+			// could be consumed by that goroutine — attributed to the
+			// wrong request id. Mark the bridge broken so every subsequent
+			// Call fails fast; caller must Close() and open a fresh bridge.
+			b.broken.Store(true)
+			return fmt.Errorf("bridge: call %s timed out after %s (bridge marked broken)", method, b.timeout)
 		}
 	} else {
 		r := <-ch
@@ -225,6 +241,12 @@ func (b *Bridge) Call(method string, params any, out any) error {
 	var resp response
 	if err := json.Unmarshal(line, &resp); err != nil {
 		return fmt.Errorf("bridge: unparseable response for %s: %w (raw: %s)", method, err, line)
+	}
+	// Belt-and-braces: also catches the case where a previous response
+	// somehow leaked through (e.g., bug in this file's locking).
+	if resp.ID != id {
+		b.broken.Store(true)
+		return fmt.Errorf("bridge: response id %d does not match request id %d for %s (protocol desync; bridge marked broken)", resp.ID, id, method)
 	}
 	if resp.Error != nil {
 		return errFromCode(resp.Error.Code, resp.Error.Message)

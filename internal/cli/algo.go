@@ -1025,11 +1025,11 @@ Output:
 			}
 			defer db.Close()
 
-			if balance == 0 {
-				// Use the cached accounts.balance if available; otherwise nothing.
-				_ = db.QueryRowContext(cmd.Context(),
-					"SELECT COALESCE(MAX(login),0) FROM accounts").Scan(new(int64))
-			}
+			// The 'accounts' table doesn't store balance today, so when
+			// --balance is 0 we let computeRMultiples fall back per-trade
+			// to 0 risk and emit 'unknown' rather than guess. A future
+			// commit could backfill accounts.balance from AccountInfo on
+			// each sync and wire it here.
 			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
 			if err != nil {
 				return err
@@ -1100,11 +1100,9 @@ func computeRMultiples(ctx context.Context, db *sql.DB, acct, fromMS, toMS int64
 	}
 	defer rows.Close()
 
-	// Sensible fallback balance: if user didn't pass one, use cached accounts.balance.
-	if fallbackBalance == 0 {
-		_ = db.QueryRowContext(ctx,
-			`SELECT 0`).Scan(&fallbackBalance) // accounts table doesn't store balance directly today
-	}
+	// fallbackBalance: caller passes --balance N to enable per-trade risk
+	// imputation when SL is missing. If it's 0, we leave it 0; risk and R
+	// for trades without SL come out as 0 ("unknown") rather than a guess.
 
 	var trades []RMultiple
 	for rows.Next() {

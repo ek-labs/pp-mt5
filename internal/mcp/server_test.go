@@ -10,19 +10,24 @@ import (
 
 func TestLooksLikeSQLWrite(t *testing.T) {
 	cases := map[string]bool{
-		"SELECT * FROM deals":             false,
-		"select 1":                        false,
-		"  with cte as (select 1) ...":    false,
-		"explain query plan select 1":     false,
-		"INSERT INTO foo VALUES (1)":      true,
-		"insert into foo":                 true,
-		"UPDATE foo SET":                  true,
-		"DELETE FROM foo":                 true,
-		"DROP TABLE foo":                  true,
-		"ALTER TABLE foo":                 true,
-		"CREATE INDEX":                    true,
-		"  PRAGMA journal_mode = wal":     true,
-		"replace into foo values":         true,
+		"SELECT * FROM deals":          false,
+		"select 1":                     false,
+		"  with cte as (select 1) ...": false,
+		"explain query plan select 1":  false,
+		"INSERT INTO foo VALUES (1)":   true,
+		"insert into foo":              true,
+		"UPDATE foo SET":               true,
+		"DELETE FROM foo":              true,
+		"DROP TABLE foo":               true,
+		"ALTER TABLE foo":              true,
+		"CREATE INDEX":                 true,
+		// PRAGMA is intentionally NOT flagged anymore — read-only PRAGMAs
+		// (table_info, schema_version, database_list) are legitimate
+		// diagnostics for the agent. Write PRAGMAs fail at the engine on
+		// the RO connection mt5_sql uses.
+		"  PRAGMA journal_mode = wal":  false,
+		"pragma table_info(deals)":     false,
+		"replace into foo values":      true,
 	}
 	for in, want := range cases {
 		if got := looksLikeSQLWrite(in); got != want {

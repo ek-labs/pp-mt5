@@ -25,14 +25,17 @@ The CLI is being built in 11 phases per the design spec. This file tracks where 
 | 10 | `pp-mt5-mcp` MCP server: mirror command tree as MCP tools | ✅ | `internal/mcp` registers 18 tools (3 foundation, 6 live reads, 2 algo, 1 sync, 2 broker writes, 2 quant, 1 audit, plus order_check). Each handler re-enters the cobra root in-process with --agent so the safety pipeline (live gate, hash-confirm, audit) applies identically. Read-only tools advertise readOnlyHint=true; broker writes carry destructiveHint=true; local-write tools (sync, backtest run) advertise destructiveHint=false. Smoke-tested via stdio JSON-RPC: initialize → tools/list (18) → `mt5_sql "select count(*) n from deals"` → `[{"n":0}]`. `pp-mt5-mcp --list-tools` enumerates without booting. |
 | 11 | Integration tests against MT5 demo account (env-gated; `MT5_PAPER=1`); release polish; final README | ✅ | `test/integration` is `//go:build integration` plus an `MT5_PAPER=1` runtime gate plus an `AccountInfo().IsLive()` refusal — three independent gates so a stray env can never let a write test touch a real account. Tests cover doctor / account info / terminal info / sync symbols / symbols list / order send dry-run / close all dry-run / sql read-only / audit tail. Unit tests cover the pure helpers (matchGlob, simpleSMA, wilderRSI, wilderATR, rollingStd, parseSpeed, MCP arg coercion, mt5_sql write-block, exit-code naming, tool registry uniqueness). Release polish: `scripts/build.ps1 -Version v0.1.0` stamps `cli.Version` via `-ldflags`; the MCP server reads the same variable via `ServerVersion()` so one stamp updates both binaries. README rewritten to drop "Phase X" hedges. |
 
-## Picking up next session
+## Post-phase review fixes
 
-The next agent should:
+Three independent reviews after Phase 11 landed produced these fix commits, all on `add/mt5-cli` past `73640f8b`:
 
-1. `cd library/trading/mt5 && go build ./... && go test ./...` — confirm the scaffold still builds.
-2. Read this file + spec in the original task message.
-3. Pick the next ⬜ phase. Implementation order should respect dependencies — Phase 1 (bridge) blocks 3, 4, 7; Phase 2 (store) blocks 3, 8, 9; Phase 5/6 (safety/config) block 7.
-4. When a phase moves from ⬜ → 🟡 or 🟡 → ✅, update this file in the same commit.
+| Commit | Severity | Highlights |
+|---|---|---|
+| `ac94da5e` | 🔴 | Rename `cmd/mt5-pp-cli` → `cmd/pp-mt5` (docs called the binary by a name `go install` didn't produce); add `store.OpenReadOnly()` with `?mode=ro&query_only(1)` so `WITH … DELETE` style CTE-injection writes via `mt5_sql` fail at the engine. |
+| `5fadabd2` | 🟡 | Wire the previously-documented-but-ignored `--profile` flag end-to-end; add `--account` persistent flag + `resolveAccountLogin` so reads are scoped to one account_login instead of silently mixing; doctor now reports `config.toml` + kill-switch state; safety docs corrected from "60s" to "60–120s bucketed". |
+| `2abff285` | 🟢 | Drop dead `BacktestResult.Metrics`; drop speculative `opens` slice; replay `--speed real` caveat; `pp-mt5-mcp --log-file`. |
+| `30cf46ba` | 🟡 | `symbols list` was missed in the first multi-account pass — fixed. Migration `0002_backtests_account.sql` adds `account_login` to the `backtests` table. README documents `--account`. |
+| `?` (this one) | 🔴+🟡 | Bridge marks itself broken on timeout + validates `resp.ID` (was leaking goroutines and could attribute late responses to the wrong call). `close all --filter` now sanitises the SQL fragment, adds `ORDER BY ticket` for hash determinism. `runSQL` no longer mis-routes PRAGMA to `Exec` on the RO path. `roundLot` reads the broker's `volume_step` per symbol (was hardcoded 0.01 — would silently reject partial closes on XAU/indices/crypto). `isOK` accepts retcode 10025 (no-change). `r-multiples` had two query branches that threw away results — removed. STATUS table updated. |
 
 ## What's intentionally NOT in the scaffold
 - Audit log writes (Phase 6).
