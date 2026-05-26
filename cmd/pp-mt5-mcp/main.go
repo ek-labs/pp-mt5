@@ -23,11 +23,22 @@ import (
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	listTools := flag.Bool("list-tools", false, "print registered tool names and exit (does not start the server)")
+	logFile := flag.String("log-file", "", "append a line per tool call to this file (timestamp, tool, exit code, error summary). Useful when running under Claude Desktop where stderr is hard to see.")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("pp-mt5-mcp", ppmcp.ServerVersion())
 		return
+	}
+
+	if *logFile != "" {
+		f, err := os.OpenFile(*logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pp-mt5-mcp: --log-file %q: %v\n", *logFile, err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		ppmcp.SetLogWriter(f)
 	}
 
 	s := ppmcp.NewServer()

@@ -13,14 +13,48 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	cli "github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/cli"
 )
+
+// Tool-call log destination. Optional — set via SetLogWriter from the binary's
+// --log-file flag. Used so Claude Desktop users can tail a file to see what
+// the agent is asking the CLI to do without diving into the host's stderr.
+var (
+	logMu sync.Mutex
+	logW  io.Writer
+)
+
+// SetLogWriter installs a writer that dispatch() will append a per-call line
+// to. Pass nil to disable. Safe to call from main before serving.
+func SetLogWriter(w io.Writer) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	logW = w
+}
+
+func writeLogLine(args []string, exitCode int, errSummary string) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if logW == nil {
+		return
+	}
+	if errSummary != "" {
+		fmt.Fprintf(logW, "%s pp-mt5 %s  exit=%d  err=%q\n",
+			time.Now().UTC().Format(time.RFC3339), strings.Join(args, " "), exitCode, errSummary)
+	} else {
+		fmt.Fprintf(logW, "%s pp-mt5 %s  exit=%d\n",
+			time.Now().UTC().Format(time.RFC3339), strings.Join(args, " "), exitCode)
+	}
+}
 
 // ServerVersion is the version reported by the MCP server. It tracks
 // cli.Version so a single -ldflags stamp at build time updates both binaries.
@@ -75,6 +109,7 @@ func dispatch(ctx context.Context, args ...string) (*mcp.CallToolResult, error) 
 		if errors.As(err, &ex) {
 			code = ex.Code
 		}
+		writeLogLine(args, code, err.Error())
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"pp-mt5 %s\nexit %d (%s)\n%s\n%s",
 			strings.Join(args, " "),
@@ -84,6 +119,7 @@ func dispatch(ctx context.Context, args ...string) (*mcp.CallToolResult, error) 
 			strings.TrimSpace(stderr.String()),
 		)), nil
 	}
+	writeLogLine(args, 0, "")
 	return mcp.NewToolResultText(stdout.String()), nil
 }
 

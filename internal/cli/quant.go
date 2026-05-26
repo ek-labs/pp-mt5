@@ -567,7 +567,7 @@ Upserts into the 'features' table keyed by (symbol, tf, time_ms).`,
 func buildFeatures(ctx context.Context, db *sql.DB, acct int64, symbol, tf string, fromMS, toMS int64,
 	atrPeriod, rsiPeriod, rvWindow int) (int, error) {
 
-	q := fmt.Sprintf(`SELECT time_ms, o, h, l, c FROM bars_%s
+	q := fmt.Sprintf(`SELECT time_ms, h, l, c FROM bars_%s
 		WHERE account_login = ? AND symbol = ? AND time_ms BETWEEN ? AND ? ORDER BY time_ms ASC`, tf)
 	rows, err := db.QueryContext(ctx, q, acct, symbol, fromMS, toMS)
 	if err != nil {
@@ -575,20 +575,18 @@ func buildFeatures(ctx context.Context, db *sql.DB, acct int64, symbol, tf strin
 	}
 	var (
 		times  []int64
-		opens  []float64
 		highs  []float64
 		lows   []float64
 		closes []float64
 	)
 	for rows.Next() {
 		var t int64
-		var o, h, l, c float64
-		if err := rows.Scan(&t, &o, &h, &l, &c); err != nil {
+		var h, l, c float64
+		if err := rows.Scan(&t, &h, &l, &c); err != nil {
 			rows.Close()
 			return 0, err
 		}
 		times = append(times, t)
-		opens = append(opens, o)
 		highs = append(highs, h)
 		lows = append(lows, l)
 		closes = append(closes, c)
@@ -597,7 +595,6 @@ func buildFeatures(ctx context.Context, db *sql.DB, acct int64, symbol, tf strin
 	if len(times) < 2 {
 		return 0, fmt.Errorf("only %d bar(s) for %s %s in window — sync more first", len(times), symbol, tf)
 	}
-	_ = opens // reserved for future open-based features
 
 	n := len(times)
 	rets := make([]float64, n)
@@ -888,8 +885,9 @@ func newReplayCmd() *cobra.Command {
 
   --granularity tick      stream ticks
   --granularity bar:M1    stream M1 bars (also M5, M15, M30, H1, H4, D1)
-  --speed real            wall-clock pace
-  --speed 10x|100x|max    accelerated (max = no sleep)
+  --speed real            wall-clock pace (practical only for short windows —
+                          a year of M1 bars at speed=real takes a year)
+  --speed 10x|100x|max    accelerated (max = no sleep, default)
 
 Outputs JSONL, one event per line — pipe to your harness. Works offline once
 the mirror has the relevant data.`,
@@ -1136,11 +1134,13 @@ stores params_json + metrics_json so you can rebuild equity curves later.`,
 				return err
 			}
 
-			// Persist
+			// Persist. The backtests.metrics_json column is reserved for
+			// per-trade equity curves a future strategy hosts will write; v1's
+			// sma-cross has nothing extra to store, so it lands as an empty
+			// JSON object rather than the literal string "null".
 			params, _ := json.Marshal(map[string]any{
 				"fast": fastN, "slow": slowN, "cost_per_trade": costPerTrade,
 			})
-			metrics, _ := json.Marshal(res.Metrics)
 			id, err := persistBacktestRow(cmd.Context(), db, backtestRowIn{
 				Strategy: "sma-cross", Symbol: symbol, TF: tf,
 				FromMS: fromT.UnixMilli(), ToMS: toT.UnixMilli(),
@@ -1152,7 +1152,7 @@ stores params_json + metrics_json so you can rebuild equity curves later.`,
 				Trades:       res.Trades,
 				WinRate:      res.WinRate,
 				ParamsJSON:   string(params),
-				MetricsJSON:  string(metrics),
+				MetricsJSON:  "{}",
 			})
 			if err != nil {
 				return err
@@ -1264,7 +1264,6 @@ type BacktestResult struct {
 	MaxDDPct     float64        `json:"max_dd_pct"`
 	FinalEquity  float64        `json:"final_equity"`
 	StartEquity  float64        `json:"start_equity"`
-	Metrics      map[string]any `json:"metrics_extra,omitempty"`
 }
 
 // runSMACrossBacktest: long-only SMA cross. Buy when fast > slow (price moves
