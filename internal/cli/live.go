@@ -43,11 +43,15 @@ Reads from the symbols table — run 'pp-mt5 sync symbols' first if it's empty.
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 
-			q := "SELECT symbol, description, digits, point, spread, volume_min, volume_max, volume_step, base_currency, profit_currency FROM symbols"
-			var rowsArgs []any
+			q := "SELECT symbol, description, digits, point, spread, volume_min, volume_max, volume_step, base_currency, profit_currency FROM symbols WHERE account_login = ?"
+			rowsArgs := []any{acct}
 			if filter != "" {
-				q += " WHERE symbol LIKE ?"
+				q += " AND symbol LIKE ?"
 				rowsArgs = append(rowsArgs, globToLike(filter))
 			}
 			q += " ORDER BY symbol"
@@ -82,10 +86,11 @@ Reads from the symbols table — run 'pp-mt5 sync symbols' first if it's empty.
 			if len(out) == 0 {
 				if filter != "" {
 					var total int
-					_ = db.QueryRowContext(cmd.Context(), "SELECT count(*) FROM symbols").Scan(&total)
-					fmt.Fprintf(cmd.ErrOrStderr(), "no symbols match %q (mirror has %d total)\n", filter, total)
+					_ = db.QueryRowContext(cmd.Context(),
+						"SELECT count(*) FROM symbols WHERE account_login = ?", acct).Scan(&total)
+					fmt.Fprintf(cmd.ErrOrStderr(), "no symbols match %q (account %d mirror has %d total)\n", filter, acct, total)
 				} else {
-					fmt.Fprintln(cmd.ErrOrStderr(), "mirror is empty — run `pp-mt5 sync symbols` first.")
+					fmt.Fprintln(cmd.ErrOrStderr(), "mirror is empty for this account — run `pp-mt5 sync symbols` first.")
 				}
 			}
 			return emit(cmd, out, func(w io.Writer, v any) {

@@ -75,6 +75,16 @@ password_env = "MT5_LIVE_PASSWORD"
 
 Then `pp-mt5 --profile demo account info`.
 
+### Multi-account mirror
+
+The local SQLite mirror keys every row on `account_login`, so it can hold data for as many broker accounts as you've synced. Read commands (`stats`, `sql`, `history`, `bars/ticks/features` etc.) scope to **one** account at a time. Resolution order:
+
+1. `--account <login>` flag (explicit override)
+2. Otherwise, the most recently synced account (`accounts.last_synced DESC LIMIT 1`)
+3. If neither yields a value → `exit 10` with a hint to run `pp-mt5 sync all` first
+
+So `pp-mt5 stats summary --since 30d` reads from whichever account you last synced. Switch with `pp-mt5 --account 12345678 stats summary`. Sync commands tag rows with the current logged-in account regardless of the flag — they get the account from the bridge, not from `--account`.
+
 ---
 
 ## Quick start

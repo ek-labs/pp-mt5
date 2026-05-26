@@ -1142,7 +1142,8 @@ stores params_json + metrics_json so you can rebuild equity curves later.`,
 				"fast": fastN, "slow": slowN, "cost_per_trade": costPerTrade,
 			})
 			id, err := persistBacktestRow(cmd.Context(), db, backtestRowIn{
-				Strategy: "sma-cross", Symbol: symbol, TF: tf,
+				AccountLogin: acct,
+				Strategy:     "sma-cross", Symbol: symbol, TF: tf,
 				FromMS: fromT.UnixMilli(), ToMS: toT.UnixMilli(),
 				Deposit:      deposit,
 				NetProfit:    res.NetProfit,
@@ -1184,18 +1185,29 @@ func newBacktestListCmd() *cobra.Command {
 				return &ExitErr{Code: ExitConfig, Err: err}
 			}
 			defer db.Close()
+			// Scope to the current account, but also include legacy rows
+			// (account_login NULL) so users who ran backtests before the
+			// migration still see them.
+			acct, err := resolveAccountLogin(cmd.Context(), db, cmd)
+			if err != nil {
+				return err
+			}
 			rows, err := db.QueryContext(cmd.Context(), `
-				SELECT id, strategy, symbol, tf, COALESCE(from_ms,0), COALESCE(to_ms,0),
+				SELECT id, COALESCE(account_login,0), strategy, symbol, tf,
+				       COALESCE(from_ms,0), COALESCE(to_ms,0),
 				       COALESCE(deposit,0), COALESCE(net_profit,0), COALESCE(profit_factor,0),
 				       COALESCE(sharpe,0), COALESCE(max_dd_pct,0), COALESCE(trades,0),
 				       COALESCE(win_rate,0), created_at_ms
-				FROM backtests ORDER BY id DESC LIMIT ?`, limit)
+				FROM backtests
+				WHERE account_login = ? OR account_login IS NULL
+				ORDER BY id DESC LIMIT ?`, acct, limit)
 			if err != nil {
 				return err
 			}
 			defer rows.Close()
 			type row struct {
 				ID           int64   `json:"id"`
+				AccountLogin int64   `json:"account_login"`
 				Strategy     string  `json:"strategy"`
 				Symbol       string  `json:"symbol"`
 				TF           string  `json:"tf"`
@@ -1213,7 +1225,7 @@ func newBacktestListCmd() *cobra.Command {
 			var all []row
 			for rows.Next() {
 				var r row
-				if err := rows.Scan(&r.ID, &r.Strategy, &r.Symbol, &r.TF,
+				if err := rows.Scan(&r.ID, &r.AccountLogin, &r.Strategy, &r.Symbol, &r.TF,
 					&r.FromMS, &r.ToMS, &r.Deposit, &r.NetProfit, &r.ProfitFactor,
 					&r.Sharpe, &r.MaxDDPct, &r.Trades, &r.WinRate, &r.CreatedAtMS); err != nil {
 					return err
@@ -1484,23 +1496,24 @@ func computeBTSharpe(dailyEq map[int64]float64, startEq float64) float64 {
 }
 
 type backtestRowIn struct {
-	Strategy, Symbol, TF       string
-	FromMS, ToMS               int64
-	Deposit, NetProfit         float64
-	ProfitFactor, Sharpe       float64
-	MaxDDPct                   float64
-	Trades                     int
-	WinRate                    float64
-	ParamsJSON, MetricsJSON    string
+	AccountLogin            int64
+	Strategy, Symbol, TF    string
+	FromMS, ToMS            int64
+	Deposit, NetProfit      float64
+	ProfitFactor, Sharpe    float64
+	MaxDDPct                float64
+	Trades                  int
+	WinRate                 float64
+	ParamsJSON, MetricsJSON string
 }
 
 func persistBacktestRow(ctx context.Context, db *sql.DB, in backtestRowIn) (int64, error) {
 	res, err := db.ExecContext(ctx, `
-		INSERT INTO backtests(strategy, symbol, tf, from_ms, to_ms, deposit, net_profit,
+		INSERT INTO backtests(account_login, strategy, symbol, tf, from_ms, to_ms, deposit, net_profit,
 		                     profit_factor, sharpe, max_dd_pct, trades, win_rate,
 		                     params_json, metrics_json)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		in.Strategy, in.Symbol, in.TF, in.FromMS, in.ToMS, in.Deposit, in.NetProfit,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		in.AccountLogin, in.Strategy, in.Symbol, in.TF, in.FromMS, in.ToMS, in.Deposit, in.NetProfit,
 		profitFactorForSQL(in.ProfitFactor), in.Sharpe, in.MaxDDPct, in.Trades, in.WinRate,
 		in.ParamsJSON, in.MetricsJSON)
 	if err != nil {

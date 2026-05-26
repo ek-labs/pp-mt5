@@ -33,9 +33,9 @@
       "description": "Stream historical bars/ticks from the local mirror to stdout JSONL. Pipe into a strategy script for offline development."
     },
     {
-      "name": "Quant export to parquet/csv/jsonl",
-      "command": "pp-mt5 bars export --symbols 'EUR*' --since 2y --out parquet",
-      "description": "Bulk export bars and ticks across symbol filters and date ranges, reading from the local mirror — never touches the bridge."
+      "name": "Quant export to csv/jsonl",
+      "command": "pp-mt5 bars export --symbols 'EUR*' --since 2y --format csv --out-dir ./exports",
+      "description": "Bulk export bars and ticks across symbol filters and date ranges, reading from the local mirror — never touches the bridge. Parquet is on the v2 roadmap; v1 produces csv or jsonl."
     }
   ],
   "exit_codes": {
