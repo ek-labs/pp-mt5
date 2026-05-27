@@ -97,14 +97,49 @@ func PrecheckWrite(cmd *cobra.Command, g Guardrails, accountTradeMode int) error
 	return nil
 }
 
-// CheckGuardrails enforces the per-command thresholds against the resolved
-// request shape. Currently checks max_volume_per_order. The other guardrails
-// (max_open_positions, max_daily_loss) require state from the bridge or the
-// mirror — wire them through callers in the write commands directly so we
-// don't tie this package to either.
+// CheckGuardrails enforces volume-only thresholds against the resolved
+// request shape. Position-count and daily-loss checks live as separate
+// functions (CheckPositionCap, CheckDailyLoss) because they need state
+// the safety package shouldn't own (bridge, DB) — the callers compose
+// them in writeCtx.openAll.
 func CheckGuardrails(g Guardrails, volume float64) error {
 	if g.MaxVolumePerOrder > 0 && volume > g.MaxVolumePerOrder {
 		return fmt.Errorf("volume %g exceeds max_volume_per_order=%g (config.toml)", volume, g.MaxVolumePerOrder)
+	}
+	return nil
+}
+
+// CheckPositionCap rejects when adding one more position would exceed the
+// configured limit. Pass the current count (from b.PositionsGet(nil)).
+// A new order_send adds 1, position close subtracts 1, position modify is
+// net-zero — callers signal intent via 'wouldAdd' (true for new opens).
+func CheckPositionCap(g Guardrails, currentOpen int, wouldAdd bool) error {
+	if g.MaxOpenPositions <= 0 {
+		return nil
+	}
+	next := currentOpen
+	if wouldAdd {
+		next++
+	}
+	if next > g.MaxOpenPositions {
+		return fmt.Errorf("opening this position would put open count at %d, exceeds max_open_positions=%d (config.toml)",
+			next, g.MaxOpenPositions)
+	}
+	return nil
+}
+
+// CheckDailyLoss rejects when today's realized P&L is already below the
+// configured floor. Pass realizedToday as a SIGNED number (negative =
+// loss). max_daily_loss is the loss floor in the account's currency, so
+// a configured 500 means "stop trading if today's realized PnL <= -500".
+// 0 (the default) disables the check.
+func CheckDailyLoss(g Guardrails, realizedToday float64) error {
+	if g.MaxDailyLoss <= 0 {
+		return nil
+	}
+	if realizedToday <= -g.MaxDailyLoss {
+		return fmt.Errorf("today's realized P&L %.2f reached max_daily_loss=%.2f floor (config.toml); trading halted for the day",
+			realizedToday, g.MaxDailyLoss)
 	}
 	return nil
 }
@@ -120,6 +155,15 @@ type Guardrails struct {
 
 // ── hash / confirm flow ──────────────────────────────────────────────────────
 
+// Known limitation: the bucket is derived from time.Now() so an operator
+// rolling the system clock backwards could revalidate a previously-printed
+// hash within whatever window the rollback exposes. We accept this for v1
+// because (a) clock rollback requires local admin which is already past
+// the safety perimeter, (b) every confirmed write is audited regardless,
+// so reconstruction is possible. Future hardening would record issued
+// hashes in the DB with a monotonic-clock-derived expiry and verify
+// against the record.
+//
 // Hash returns the canonical SHA-256 hash of a request bucketed to the
 // current Window. Same request inside the same 60s bucket produces the same
 // hash so a user can copy/paste the value they just saw.

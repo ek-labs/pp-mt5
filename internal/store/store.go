@@ -119,19 +119,21 @@ func OpenAndMigrate(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Migrate applies every migration in the embedded migrations directory whose
-// integer version is greater than the highest currently recorded in
-// schema_migrations. Each migration runs in its own transaction (the SQL file
-// itself may contain BEGIN/COMMIT — that's fine; we use Exec, not a separate
-// driver tx).
+// Migrate applies every pending migration. Each migration runs in its own
+// transaction so a partial apply rolls back cleanly; the runner re-checks
+// applied versions INSIDE the transaction so a concurrent process that
+// raced ahead doesn't cause a duplicate-column/-table error.
+//
+// Migration files are pure DDL/DML — no inline BEGIN/COMMIT and no manual
+// INSERT INTO schema_migrations. The runner owns bookkeeping.
 func Migrate(ctx context.Context, db *sql.DB) error {
 	files, err := listMigrations()
 	if err != nil {
 		return err
 	}
 
-	// Bootstrap schema_migrations if it doesn't exist yet. We can't query for
-	// applied versions until the table exists.
+	// Bootstrap schema_migrations before we can query for applied versions.
+	// IF NOT EXISTS makes this safe to re-run against any state.
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
 		applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
@@ -139,29 +141,58 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("bootstrap schema_migrations: %w", err)
 	}
 
-	applied, err := appliedVersions(ctx, db)
-	if err != nil {
-		return err
-	}
-
 	for _, m := range files {
-		if applied[m.Version] {
-			continue
-		}
 		body, err := fs.ReadFile(migrationsFS, m.path)
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", m.Name, err)
 		}
-		if _, err := db.ExecContext(ctx, string(body)); err != nil {
-			return fmt.Errorf("apply migration %s: %w", m.Name, err)
+		if err := applyOneMigration(ctx, db, m, string(body)); err != nil {
+			return err
 		}
-		// The migration itself inserts into schema_migrations; double-check.
-		var seen int
-		if err := db.QueryRowContext(ctx, "SELECT 1 FROM schema_migrations WHERE version=?", m.Version).Scan(&seen); err == sql.ErrNoRows {
-			if _, err := db.ExecContext(ctx, "INSERT INTO schema_migrations(version) VALUES (?)", m.Version); err != nil {
-				return fmt.Errorf("record migration %s: %w", m.Name, err)
-			}
-		}
+	}
+	return nil
+}
+
+// applyOneMigration runs a single migration inside an immediate transaction.
+// The pre-check inside the tx is the lock: under SQLite WAL the BEGIN
+// IMMEDIATE acquires the reserved lock; a concurrent process trying the
+// same migration will block on busy_timeout (configured in the DSN), then
+// see the already-applied row and skip.
+func applyOneMigration(ctx context.Context, db *sql.DB, m migration, body string) error {
+	// BEGIN IMMEDIATE acquires the reserved lock up front so concurrent
+	// readers don't slip in between our pre-check and the DDL.
+	if _, err := db.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("acquire migration lock for %s: %w", m.Name, err)
+	}
+	rollback := func() { _, _ = db.ExecContext(ctx, `ROLLBACK`) }
+
+	// Re-check under the lock — another process may have applied this
+	// while we were waiting for the busy_timeout window.
+	var seen int
+	err := db.QueryRowContext(ctx,
+		`SELECT 1 FROM schema_migrations WHERE version = ?`, m.Version).Scan(&seen)
+	if err == nil {
+		// Already applied by a concurrent process; nothing to do.
+		_, _ = db.ExecContext(ctx, `COMMIT`)
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		rollback()
+		return fmt.Errorf("re-check migration %s under lock: %w", m.Name, err)
+	}
+
+	if _, err := db.ExecContext(ctx, body); err != nil {
+		rollback()
+		return fmt.Errorf("apply migration %s: %w", m.Name, err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO schema_migrations(version) VALUES (?)`, m.Version); err != nil {
+		rollback()
+		return fmt.Errorf("record migration %s: %w", m.Name, err)
+	}
+	if _, err := db.ExecContext(ctx, `COMMIT`); err != nil {
+		rollback()
+		return fmt.Errorf("commit migration %s: %w", m.Name, err)
 	}
 	return nil
 }
@@ -197,19 +228,3 @@ func listMigrations() ([]migration, error) {
 	return out, nil
 }
 
-func appliedVersions(ctx context.Context, db *sql.DB) (map[int]bool, error) {
-	rows, err := db.QueryContext(ctx, "SELECT version FROM schema_migrations")
-	if err != nil {
-		return nil, fmt.Errorf("query schema_migrations: %w", err)
-	}
-	defer rows.Close()
-	out := make(map[int]bool)
-	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		out[v] = true
-	}
-	return out, rows.Err()
-}

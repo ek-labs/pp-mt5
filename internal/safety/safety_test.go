@@ -105,3 +105,70 @@ func dummyWriteCmd() *cobra.Command {
 	AddWriteFlags(c)
 	return c
 }
+
+func TestCheckPositionCap(t *testing.T) {
+	cases := []struct {
+		max         int
+		current     int
+		wouldAdd    bool
+		shouldError bool
+	}{
+		{0, 99, true, false},  // 0 = disabled
+		{5, 4, true, false},   // would put count at 5, equal to max — OK
+		{5, 5, true, true},    // would put count at 6, over — reject
+		{5, 5, false, false},  // close action, not adding — OK
+		{1, 1, true, true},    // edge: 1 max, 1 open, want to add
+		{1, 0, true, false},   // edge: 1 max, 0 open, want to add
+	}
+	for _, c := range cases {
+		err := CheckPositionCap(Guardrails{MaxOpenPositions: c.max}, c.current, c.wouldAdd)
+		got := err != nil
+		if got != c.shouldError {
+			t.Errorf("CheckPositionCap(max=%d, current=%d, add=%v) err=%v, wantErr=%v",
+				c.max, c.current, c.wouldAdd, err, c.shouldError)
+		}
+	}
+}
+
+func TestCheckDailyLoss(t *testing.T) {
+	cases := []struct {
+		max         float64 // configured floor (positive number)
+		realized    float64 // signed today's P&L
+		shouldError bool
+	}{
+		{0, -10000, false},   // 0 = disabled
+		{500, 0, false},      // flat
+		{500, -100, false},   // small loss, under floor
+		{500, -499.99, false},// just under
+		{500, -500, true},    // exactly at floor → halt
+		{500, -800, true},    // well past floor
+		{500, 250, false},    // profitable day
+	}
+	for _, c := range cases {
+		err := CheckDailyLoss(Guardrails{MaxDailyLoss: c.max}, c.realized)
+		got := err != nil
+		if got != c.shouldError {
+			t.Errorf("CheckDailyLoss(max=%g, realized=%g) err=%v, wantErr=%v",
+				c.max, c.realized, err, c.shouldError)
+		}
+	}
+}
+
+func TestHashBindsDeviation(t *testing.T) {
+	// The hash must change when deviation changes — otherwise a user could
+	// dry-run with tight slippage and confirm with wide slippage under the
+	// same hash. This is the binding the fix for the 4th-review pass added.
+	base := map[string]any{
+		"op": "order_send", "symbol": "EURUSD", "side": "buy", "volume": 0.10,
+		"deviation": 5,
+	}
+	wide := map[string]any{
+		"op": "order_send", "symbol": "EURUSD", "side": "buy", "volume": 0.10,
+		"deviation": 9999,
+	}
+	hBase, _ := Hash(base)
+	hWide, _ := Hash(wide)
+	if hBase == hWide {
+		t.Fatalf("hash did not change when deviation changed (%s == %s); confirm-with-wide-deviation would slip through", hBase, hWide)
+	}
+}

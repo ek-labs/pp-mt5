@@ -7,15 +7,9 @@
 -- All bar/tick/deal/order tables carry the originating account_login so a
 -- single store can mirror multiple accounts.
 
-BEGIN;
-
--- schema_migrations is bootstrapped by the Go runner before any migration
--- runs (the runner needs to query applied versions). IF NOT EXISTS makes
--- this file safely re-applicable.
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version    INTEGER PRIMARY KEY,
-    applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
-);
+-- The Go runner wraps each migration in BEGIN IMMEDIATE / COMMIT, owns
+-- schema_migrations bookkeeping, and re-checks the applied state inside
+-- the transaction. Migrations themselves are pure DDL/DML.
 
 CREATE TABLE accounts (
     login        INTEGER PRIMARY KEY,
@@ -277,7 +271,3 @@ CREATE TABLE audit (
     mode        TEXT              -- paper | live | dry-run
 );
 CREATE INDEX idx_audit_time ON audit(time_ms);
-
-INSERT INTO schema_migrations(version) VALUES (1);
-
-COMMIT;

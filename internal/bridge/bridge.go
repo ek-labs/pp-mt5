@@ -21,6 +21,7 @@ package bridge
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -278,22 +279,64 @@ func FindPython() (string, error) {
 	return "", ErrPythonMissing
 }
 
-// materializeScript writes the embedded bridge script to a stable temp path
-// and returns it. Stable filename means re-runs reuse the same file (lets the
-// user inspect or attach a debugger).
+// materializeScript writes the embedded bridge script to a content-addressed
+// path so different binaries embedding different scripts coexist without
+// aliasing. Stable per-content path means re-runs of the same binary reuse
+// the same file (the user can inspect it, attach a debugger, etc.).
+//
+// The original implementation used a fixed filename and a size-only freshness
+// check, which had two failure modes:
+//   - Two binaries with different embedded scripts of equal byte length would
+//     run each other's script (silent wrong-version).
+//   - Concurrent first-run binaries racing on os.WriteFile could leave the
+//     file partially written for the loser; the winner's Python would crash
+//     mid-import.
+//
+// Fix: name the file by SHA-256 prefix of the script body, write to a unique
+// temp file then rename atomically. Same-content paths skip the write entirely.
 func materializeScript() (string, error) {
 	dir := filepath.Join(os.TempDir(), "pp-mt5")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "mt5_bridge.py")
-	// Only overwrite if missing or stale (size mismatch). Avoids races between
-	// concurrent processes appending to the same path.
+	sum := sha256.Sum256(bridgeScript)
+	name := fmt.Sprintf("mt5_bridge_%x.py", sum[:8])
+	path := filepath.Join(dir, name)
+
+	// Skip the write if a same-content file is already there. Content-
+	// addressed filename means matching st.Size() == len() AND matching
+	// the body — equal size alone is no longer the gate.
 	if st, err := os.Stat(path); err == nil && st.Size() == int64(len(bridgeScript)) {
 		return path, nil
 	}
-	if err := os.WriteFile(path, bridgeScript, 0644); err != nil {
-		return "", fmt.Errorf("write embedded bridge script: %w", err)
+
+	// Write to a unique temp path, then rename. Atomic rename on POSIX
+	// AND on Windows (when the destination doesn't exist; if it does,
+	// os.Rename on Windows uses MOVEFILE_REPLACE_EXISTING via
+	// MoveFileExW — also atomic at the filesystem level).
+	tmp, err := os.CreateTemp(dir, name+".tmp-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp bridge script: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(bridgeScript); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("write temp bridge script: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("close temp bridge script: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		// On Windows two processes racing CreateTemp+Rename can collide; if
+		// the destination ended up correct (winner already wrote it), accept.
+		if st, sterr := os.Stat(path); sterr == nil && st.Size() == int64(len(bridgeScript)) {
+			os.Remove(tmpPath)
+			return path, nil
+		}
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("rename bridge script: %w", err)
 	}
 	return path, nil
 }

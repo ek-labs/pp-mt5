@@ -614,9 +614,9 @@ func buildFeatures(ctx context.Context, db *sql.DB, acct int64, symbol, tf strin
 		return 0, err
 	}
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO features(symbol, tf, time_ms, ret, log_ret, atr_14, rsi_14, realized_vol_20)
-		VALUES (?,?,?,?,?,?,?,?)
-		ON CONFLICT(symbol, tf, time_ms) DO UPDATE SET
+		INSERT INTO features(account_login, symbol, tf, time_ms, ret, log_ret, atr_14, rsi_14, realized_vol_20)
+		VALUES (?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(account_login, symbol, tf, time_ms) DO UPDATE SET
 		  ret=excluded.ret, log_ret=excluded.log_ret,
 		  atr_14=excluded.atr_14, rsi_14=excluded.rsi_14,
 		  realized_vol_20=excluded.realized_vol_20`)
@@ -629,7 +629,7 @@ func buildFeatures(ctx context.Context, db *sql.DB, acct int64, symbol, tf strin
 	written := 0
 	for i := 0; i < n; i++ {
 		if _, err := stmt.ExecContext(ctx,
-			symbol, tf, times[i],
+			acct, symbol, tf, times[i],
 			nullIfNaN(rets[i]), nullIfNaN(logRets[i]),
 			nullIfNaN(atr[i]), nullIfNaN(rsi[i]), nullIfNaN(rv[i]),
 		); err != nil {
@@ -1277,11 +1277,22 @@ type BacktestResult struct {
 	StartEquity  float64        `json:"start_equity"`
 }
 
-// runSMACrossBacktest: long-only SMA cross. Buy when fast > slow (price moves
-// next bar at the close, simple model), flat when fast <= slow. P&L is the
-// log return of price × position × deposit (constant exposure model so the
-// equity curve is dimensionless × deposit; this is a teaching backtest, not
-// a sizing engine).
+// runSMACrossBacktest: long-only SMA cross. Buy when fast > slow, flat when
+// fast <= slow.
+//
+// FILL MODEL — lookahead within the bar.
+// Signals are computed using bar i's close, and entries/exits also use bar
+// i's close as the fill price. In reality you can't know the close before
+// it happens, so real-trading results will differ. We document this rather
+// than silently shifting entries to closes[i+1] because v1's goal is to
+// validate the harness (bar loop, equity curve, persistence) — strategy
+// honesty comes with v2's Python strategy hosting where the user controls
+// the fill model. The mt5-pp-backtester sibling CLI is what you want for
+// "what would my EA actually have done?".
+//
+// P&L is the log return of price × position × deposit (constant exposure
+// model so the equity curve is dimensionless × deposit; this is a
+// teaching backtest, not a sizing engine).
 func runSMACrossBacktest(ctx context.Context, db *sql.DB,
 	acct int64, symbol, tf string, fromMS, toMS int64, deposit, costPerTrade float64,
 	fastN, slowN int) (*BacktestResult, error) {

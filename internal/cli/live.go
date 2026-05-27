@@ -511,12 +511,53 @@ Safety flow:
 			if err := safety.CheckGuardrails(g, volume); err != nil {
 				return ctx.reject(db, acc.Login, req, err)
 			}
+			// order_send opens a NEW position — wouldAdd=true.
+			if err := checkPositionCapLive(cmd.Context(), b, g, true); err != nil {
+				return ctx.reject(db, acc.Login, req, err)
+			}
+			if err := checkDailyLossLive(cmd.Context(), db, acc.Login, g); err != nil {
+				return ctx.reject(db, acc.Login, req, err)
+			}
 			return ctx.runOrderSend(b, db, acc, req)
 		},
 	}
 	addOrderFlags(cmd)
 	safety.AddWriteFlags(cmd)
 	return cmd
+}
+
+// checkPositionCapLive queries the live position count via the bridge and
+// hands it to safety.CheckPositionCap. Best-effort: a bridge error returns
+// nil so a transient terminal hiccup doesn't block trading. The
+// max_open_positions guardrail is advisory, not load-bearing.
+func checkPositionCapLive(ctx context.Context, b *bridge.Bridge, g safety.Guardrails, wouldAdd bool) error {
+	if g.MaxOpenPositions <= 0 {
+		return nil
+	}
+	positions, err := b.PositionsGet(nil)
+	if err != nil {
+		return nil
+	}
+	return safety.CheckPositionCap(g, len(positions), wouldAdd)
+}
+
+// checkDailyLossLive sums today's realized P&L from the deals table (UTC
+// day boundary). Best-effort: returns nil on query error.
+func checkDailyLossLive(ctx context.Context, db *sql.DB, acct int64, g safety.Guardrails) error {
+	if g.MaxDailyLoss <= 0 {
+		return nil
+	}
+	dayStart := time.Now().UTC().Truncate(24 * time.Hour).UnixMilli()
+	var realized float64
+	err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(profit + commission + swap + fee), 0)
+		 FROM deals
+		 WHERE account_login = ? AND time_ms >= ? AND position_id <> 0 AND entry = 'out'`,
+		acct, dayStart).Scan(&realized)
+	if err != nil {
+		return nil
+	}
+	return safety.CheckDailyLoss(g, realized)
 }
 
 func addOrderFlags(cmd *cobra.Command) {
@@ -895,14 +936,16 @@ func (w writeCtx) runOrderSend(b *bridge.Bridge, db *sql.DB, acc *bridge.Account
 }
 
 // hashableIntent strips fields that move with the market (price) so the hash
-// reflects user intent and survives small price ticks within the 60s window.
-// 'deviation' covers actual slippage at execution time.
+// reflects user intent and survives small price ticks within the 60-120s
+// bucketed window. NOTE: 'deviation' (slippage tolerance) is intent — the
+// user picked it, the user must confirm it. Stripping it would let a wider
+// deviation slip through on --confirm than was shown in the dry-run.
 func hashableIntent(req map[string]any) map[string]any {
 	out := make(map[string]any, len(req))
 	for k, v := range req {
 		switch k {
-		case "price", "deviation":
-			// skip — these aren't user intent
+		case "price":
+			// skip — moves with the market between dry-run and confirm
 		default:
 			out[k] = v
 		}
@@ -936,29 +979,50 @@ func (w writeCtx) printOrderResult(res *bridge.OrderSendResult) {
 	tw.Flush()
 }
 
+// writeAudit funnels every audit-write call so failures surface to stderr
+// with a tag that makes them grep-able. We never abort the calling command
+// on audit failure (the broker's already executed — the user needs to see
+// what happened), but we DO scream.
+//
+// 'critical' is true for auditConfirmed and auditError — those record post-
+// broker-write state and losing them silently is the worst outcome. For
+// reject / dryRun the absence of an audit row is also detectable from the
+// command exit code and stdout, so the warning is enough.
+func (w writeCtx) writeAudit(db *sql.DB, e safety.AuditEntry, critical bool) {
+	if err := safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), e); err != nil {
+		prefix := "warn"
+		if critical {
+			prefix = "CRITICAL"
+		}
+		fmt.Fprintf(w.cmd.ErrOrStderr(),
+			"AUDIT %s: failed to record %s entry: %v\n  (broker action, if any, has ALREADY occurred; reconcile from broker history)\n",
+			prefix, w.opName, err)
+	}
+}
+
 func (w writeCtx) reject(db *sql.DB, accLogin int64, req map[string]any, why error) error {
 	buf, _ := json.Marshal(req)
-	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+	w.writeAudit(db, safety.AuditEntry{
 		Command:      w.opName,
 		Request:      buf,
 		Confirmed:    false,
 		Error:        why.Error(),
 		AccountLogin: accLogin,
 		Mode:         modeStr(),
-	})
+	}, false)
 	return &ExitErr{Code: ExitSafetyRejected, Err: why}
 }
 
 func (w writeCtx) auditDryRun(db *sql.DB, accLogin int64, req map[string]any, hash string) {
 	buf, _ := json.Marshal(req)
-	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+	w.writeAudit(db, safety.AuditEntry{
 		Command:      w.opName,
 		Request:      buf,
 		Hash:         hash,
 		Confirmed:    false,
 		AccountLogin: accLogin,
 		Mode:         modeStr(),
-	})
+	}, false)
 }
 
 func (w writeCtx) auditConfirmed(db *sql.DB, accLogin int64, req, res any) {
@@ -968,7 +1032,7 @@ func (w writeCtx) auditConfirmed(db *sql.DB, accLogin int64, req, res any) {
 	if m, ok := req.(map[string]any); ok {
 		hashSrc = hashableIntent(m)
 	}
-	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+	w.writeAudit(db, safety.AuditEntry{
 		Command:      w.opName,
 		Request:      reqBuf,
 		Hash:         safety.CurrentHash(hashSrc),
@@ -976,12 +1040,12 @@ func (w writeCtx) auditConfirmed(db *sql.DB, accLogin int64, req, res any) {
 		Response:     resBuf,
 		AccountLogin: accLogin,
 		Mode:         modeStr(),
-	})
+	}, true)
 }
 
 func (w writeCtx) auditError(db *sql.DB, accLogin int64, req map[string]any, err error) {
 	buf, _ := json.Marshal(req)
-	_ = safety.AppendAudit(w.cmd.Context(), db, store.AuditPath(), safety.AuditEntry{
+	w.writeAudit(db, safety.AuditEntry{
 		Command:      w.opName,
 		Request:      buf,
 		Hash:         safety.CurrentHash(hashableIntent(req)),
@@ -989,7 +1053,7 @@ func (w writeCtx) auditError(db *sql.DB, accLogin int64, req map[string]any, err
 		Error:        err.Error(),
 		AccountLogin: accLogin,
 		Mode:         modeStr(),
-	})
+	}, true)
 }
 
 func modeStr() string {

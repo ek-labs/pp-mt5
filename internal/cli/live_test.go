@@ -107,3 +107,31 @@ func TestLooksLikeWriteDoesNotFlagPRAGMA(t *testing.T) {
 		}
 	}
 }
+
+func TestHashableIntentKeepsDeviationStripsPrice(t *testing.T) {
+	// price moves with the market between dry-run and confirm — strip it.
+	// deviation is the user's slippage tolerance — must be in the hash
+	// or a confirm with wider deviation would slip through under a hash
+	// shown for a tighter one.
+	in := map[string]any{
+		"symbol":    "EURUSD.s",
+		"volume":    0.10,
+		"type":      0,
+		"price":     1.16234,
+		"deviation": 5,
+		"sl":        1.16000,
+		"tp":        1.16500,
+	}
+	out := hashableIntent(in)
+	if _, ok := out["price"]; ok {
+		t.Error("hashableIntent should strip 'price' (moves with market)")
+	}
+	if d, ok := out["deviation"]; !ok || d != 5 {
+		t.Errorf("hashableIntent must keep 'deviation' = 5, got %v ok=%v", d, ok)
+	}
+	for _, k := range []string{"symbol", "volume", "type", "sl", "tp"} {
+		if _, ok := out[k]; !ok {
+			t.Errorf("hashableIntent dropped %q which is user intent", k)
+		}
+	}
+}

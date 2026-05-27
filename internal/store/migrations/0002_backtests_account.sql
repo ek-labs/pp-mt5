@@ -7,12 +7,8 @@
 -- SQLite ALTER TABLE supports ADD COLUMN; the migration is idempotent because
 -- the runner skips a version that's already recorded in schema_migrations.
 
-BEGIN;
+-- Wrapped in BEGIN IMMEDIATE / COMMIT by the Go migration runner.
 
 ALTER TABLE backtests ADD COLUMN account_login INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_backtests_account ON backtests(account_login);
-
-INSERT INTO schema_migrations(version) VALUES (2);
-
-COMMIT;
