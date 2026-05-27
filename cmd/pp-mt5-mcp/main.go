@@ -6,7 +6,7 @@
 //
 // Install + register with Claude Desktop:
 //
-//	go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5-mcp@latest
+//	go install github.com/ek-labs/pp-mt5/cmd/pp-mt5-mcp@latest
 //	claude mcp add pp-mt5-mcp -- pp-mt5-mcp
 package main
 
@@ -17,7 +17,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	ppmcp "github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/mcp"
+	ppmcp "github.com/ek-labs/pp-mt5/internal/mcp"
 )
 
 func main() {

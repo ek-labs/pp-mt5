@@ -22,7 +22,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	cli "github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/cli"
+	cli "github.com/ek-labs/pp-mt5/internal/cli"
 )
 
 // Tool-call log destination. Optional — set via SetLogWriter from the binary's

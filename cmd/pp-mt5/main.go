@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/cli"
+	"github.com/ek-labs/pp-mt5/internal/cli"
 )
 
 func main() {

@@ -17,22 +17,23 @@ Behind that one line: snapshot live positions to the local mirror, SELECT the ca
 - **Windows-only host for live MT5.** The `MetaTrader5` Python package only runs on Windows. Mac/Linux users can still run `pp-mt5 sql`, `replay`, `stats`, and `backtest` against a synced mirror — they just can't pull live data or send orders without a Windows MT5 host.
 - **Python subprocess overhead.** ~50ms per round trip to the bridge. The local SQLite mirror exists precisely to keep this off the hot path — `sql`, `stats`, `replay`, and `backtest` answer in microseconds, not 50ms.
 - **Helper EA required for trade event streaming** (`pp-mt5 watch trades --tail`). Phase 2. v1 workaround: poll `positions list` on an interval. See [helper/TODO.md](./helper/TODO.md).
-- **Sibling CLI to `pp-mt5-backtester`.** This tool is for live + algo + quant workflows. For headless `terminal64.exe + .ini` strategy-tester runs, use [`library/finance/mt5-backtester/`](../../finance/mt5-backtester/). Different binary, different transport, no overlap.
+- **Sibling CLI: [`pp-mt5-backtester`](https://github.com/ek-labs/pp-mt5-backtester).** This tool is for live + algo + quant workflows. For headless `terminal64.exe + .ini` strategy-tester runs, use the sibling repo. Different binary, different transport, no overlap.
 
 ---
 
 ## Install
 
 ```bash
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5@latest
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5-mcp@latest
+go install github.com/ek-labs/pp-mt5/cmd/pp-mt5@latest
+go install github.com/ek-labs/pp-mt5/cmd/pp-mt5-mcp@latest
 py -3 -m pip install MetaTrader5      # Windows only
 ```
 
 Or build from source with a version stamp:
 
 ```powershell
-cd library\trading\mt5
+git clone https://github.com/ek-labs/pp-mt5
+cd pp-mt5
 .\scripts\build.ps1 -Version v0.1.0
 .\bin\pp-mt5.exe --version
 .\bin\pp-mt5-mcp.exe --version
@@ -255,7 +256,7 @@ A skill ships at [`SKILL.md`](./SKILL.md). After install, `/pp-mt5` is available
 Install + register:
 
 ```bash
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5-mcp@latest
+go install github.com/ek-labs/pp-mt5/cmd/pp-mt5-mcp@latest
 claude mcp add pp-mt5-mcp -- pp-mt5-mcp
 ```
 
@@ -310,4 +311,4 @@ The dry-run write tests never pass `--confirm` so no order ever reaches the brok
 - [printingpress.dev](https://printingpress.dev) — design philosophy
 - [`library/media-and-entertainment/youtube/`](../../media-and-entertainment/youtube/) — structural template (read-only reference)
 - Peter Steinberger's `discrawl` and `gogcli` — the local-mirror playbook the press is built on
-- `library/finance/mt5-backtester/` — sibling CLI for headless Strategy Tester runs
+- `github.com/ek-labs/pp-mt5-backtester/` — sibling CLI for headless Strategy Tester runs

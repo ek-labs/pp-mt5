@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/bridge"
+	"github.com/ek-labs/pp-mt5/internal/bridge"
 )
 
 // Counts is what each Sync* returns so the CLI can print a summary.

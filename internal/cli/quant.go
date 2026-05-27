@@ -19,7 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/store"
+	"github.com/ek-labs/pp-mt5/internal/store"
 )
 
 // Allowed timeframes mirror the bars_<TF> tables created by migration 0001.

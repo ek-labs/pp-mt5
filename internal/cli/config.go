@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/config"
+	"github.com/ek-labs/pp-mt5/internal/config"
 )
 
 // `pp-mt5 config init` writes the example config file. `pp-mt5 config` (the

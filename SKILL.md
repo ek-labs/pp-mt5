@@ -15,7 +15,7 @@ metadata:
     install:
       - kind: go
         bins: [pp-mt5]
-        module: github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5
+        module: github.com/ek-labs/pp-mt5/cmd/pp-mt5
       - kind: pip
         packages: [MetaTrader5]
         platform: windows
@@ -28,7 +28,7 @@ metadata:
 ## Prerequisites
 
 ```bash
-go install github.com/mvanhorn/printing-press-library/library/trading/mt5/cmd/pp-mt5@latest
+go install github.com/ek-labs/pp-mt5/cmd/pp-mt5@latest
 py -3 -m pip install MetaTrader5      # Windows only
 pp-mt5 doctor
 ```

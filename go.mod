@@ -1,4 +1,4 @@
-module github.com/mvanhorn/printing-press-library/library/trading/mt5
+module github.com/ek-labs/pp-mt5
 
 go 1.25.5
 

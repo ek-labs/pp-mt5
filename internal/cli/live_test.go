@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/bridge"
+	"github.com/ek-labs/pp-mt5/internal/bridge"
 )
 
 func TestValidateCloseAllFilter(t *testing.T) {

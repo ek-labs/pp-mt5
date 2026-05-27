@@ -33,8 +33,8 @@ import (
 	"testing"
 	"time"
 
-	cli "github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/cli"
-	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/bridge"
+	cli "github.com/ek-labs/pp-mt5/internal/cli"
+	"github.com/ek-labs/pp-mt5/internal/bridge"
 )
 
 // guard returns the demo creds or skips. Every test calls this first.
