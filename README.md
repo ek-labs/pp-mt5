@@ -235,38 +235,98 @@ For writes, an agent should:
 
 ---
 
-## Claude Code integration
+## Use with an AI assistant
 
-A skill ships at [`SKILL.md`](./SKILL.md). After install, `/pp-mt5` is available in Claude Code with full command-tree awareness, the safety semantics, and exit-code meanings baked in.
+The whole point of pp-mt5 is that you can stop clicking through MT5 windows and just **ask**. The CLI ships a sibling MCP server (`pp-mt5-mcp`) that exposes 18 tools to any MCP-capable client. What that gives you, in practice:
 
----
+```
+You:    "what's my MT5 balance and any open positions?"
+Claude: "Balance 13,377.45 ZAR. No open positions, free margin matches
+         balance. Account is in PAPER mode."
 
-## Claude Desktop MCP
+You:    "close every position losing more than 50 ZAR"
+Claude: "Found 3: EURUSD -78, GBPJPY -112, XAUUSD -203. Total -393.
+         Hash: a3f7…  — confirm?"
+You:    "yes"
+Claude: ✅ closed all 3.
+```
 
-`pp-mt5-mcp` exposes the command tree over MCP via stdio. 18 tools cover the full surface:
+The safety pipeline (kill-switch / live-mode gate / hash-confirm / audit) applies identically through the MCP path — the agent **cannot** send a real-money order without your explicit yes on the dry-run hash.
+
+### Which Claude surface works?
+
+| Surface | Works? | How |
+|---|---|---|
+| **Claude Code** (terminal) | ✅ today | Install the skill (next section) — `/pp-mt5` becomes a slash-command with full safety/exit-code awareness |
+| **Claude Desktop** (Mac/Windows app) | ✅ with one config edit | JSON snippet below |
+| **claude.ai web** | ❌ | Web Claude only supports hosted MCP connectors; it can't reach a local binary on your machine |
+| **Claude mobile** | ❌ | Same as web |
+
+Don't try to "fix" the web/mobile limitation by hosting `pp-mt5-mcp` on a public URL — exposing a tool that can send broker orders over the open internet is a bad idea even with auth.
+
+### Setup — Claude Code
+
+Install:
+```bash
+go install github.com/ek-labs/pp-mt5/cmd/pp-mt5@latest
+go install github.com/ek-labs/pp-mt5/cmd/pp-mt5-mcp@latest
+```
+
+A SKILL.md ships at [`SKILL.md`](./SKILL.md). Copy this directory into `~/.claude/skills/pp-mt5/`, and `/pp-mt5` will be auto-registered in your next Claude Code session. Or register the MCP server directly:
+
+```bash
+claude mcp add pp-mt5-mcp -- pp-mt5-mcp
+```
+
+### Setup — Claude Desktop
+
+Edit your Claude Desktop config file:
+
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+Add (or merge with existing `mcpServers`):
+
+```json
+{
+  "mcpServers": {
+    "pp-mt5": {
+      "command": "pp-mt5-mcp"
+    }
+  }
+}
+```
+
+If `pp-mt5-mcp` isn't on your PATH, point at the absolute path instead:
+
+```json
+{
+  "mcpServers": {
+    "pp-mt5": {
+      "command": "C:\\Users\\you\\go\\bin\\pp-mt5-mcp.exe"
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The 18 MT5 tools (`mt5_account_info`, `mt5_positions_list`, `mt5_close_all`, …) appear in the 🔌 connectors panel and any chat can use them.
+
+### The 18 MCP tools
 
 - **Foundation** — `mt5_doctor`, `mt5_account_info`, `mt5_terminal_info`
 - **Live reads** — `mt5_symbols_list`, `mt5_quote`, `mt5_positions_list`, `mt5_orders_list`, `mt5_history_deals`, `mt5_risk_preview`
 - **Algo** — `mt5_stats_summary`, `mt5_sql` (read-only)
 - **Sync** — `mt5_sync_all`
-- **Writes** — `mt5_order_check` (preview), `mt5_order_send`, `mt5_close_all` (dry-run + `confirm`)
+- **Writes** — `mt5_order_check` (preview), `mt5_order_send`, `mt5_close_all` (both dry-run + `confirm` flow)
 - **Quant** — `mt5_backtest_run`, `mt5_backtest_list`
 - **Audit** — `mt5_audit_tail`
 
-Install + register:
-
-```bash
-go install github.com/ek-labs/pp-mt5/cmd/pp-mt5-mcp@latest
-claude mcp add pp-mt5-mcp -- pp-mt5-mcp
-```
-
-List tool names without booting the server:
-
+List tools without booting the server:
 ```bash
 pp-mt5-mcp --list-tools
 ```
 
-Every write tool runs the same safety pipeline as the CLI — first call returns a SHA-256 intent hash; the agent must surface the dry-run summary to the human and re-call with `confirm: <hash>` to actually execute. Tools advertise `readOnlyHint` and `destructiveHint` so the host can colour calls appropriately.
+Tools advertise `readOnlyHint` and `destructiveHint` so the host can colour calls appropriately. The agent should always surface the dry-run summary before passing `confirm: <hash>` — if it doesn't, the safety pipeline still won't execute, but a well-behaved host walks you through it.
 
 ---
 
