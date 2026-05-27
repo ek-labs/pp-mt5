@@ -514,7 +514,7 @@ func newFeaturesBuildCmd() *cobra.Command {
   - rsi_14        Wilder RSI over --rsi bars
   - realized_vol  stdev of log returns over --rv-window bars (sample stdev; not annualized)
 
-Upserts into the 'features' table keyed by (symbol, tf, time_ms).`,
+Upserts into the 'features' table keyed by (account_login, symbol, tf, time_ms).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if symbol == "" {
 				return &ExitErr{Code: ExitUsage, Err: fmt.Errorf("--symbol is required")}
@@ -1325,10 +1325,10 @@ func runSMACrossBacktest(ctx context.Context, db *sql.DB,
 	fast := simpleSMA(closes, fastN)
 	slow := simpleSMA(closes, slowN)
 
-	// Walk bars: on each bar close we read SMAs at index i, then position is
-	// held for the period that ends at bar i+1's close. Trades happen at the
-	// close of bar i (entry) and the close of the bar where we flip back to
-	// flat (exit). Slippage is approximated by costPerTrade on round-trip.
+	// Walk bars: on each bar close we read the SMAs computed from that same
+	// bar's close and fill at the same close (the lookahead documented in
+	// the docstring above). Slippage is approximated by costPerTrade on
+	// round-trip.
 	pos := 0      // 0 = flat, 1 = long
 	entryPx := 0.0
 	var (

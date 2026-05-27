@@ -14,8 +14,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
+
+// auditFileMu serializes JSONL appends within a single process so two
+// goroutines never race the OpenFile/Write/Close cycle. Cross-process
+// safety relies on the OS guarantee that a single write() to an O_APPEND
+// fd is atomic for sizes below PIPE_BUF on POSIX (4096+ bytes — JSON
+// audit lines are smaller) and that FILE_APPEND_DATA on Windows is
+// atomic per WriteFile call. Both hold here because appendJSONL issues
+// the JSON + '\n' in one f.Write call.
+var auditFileMu sync.Mutex
 
 // AuditEntry is one row in the log.
 type AuditEntry struct {
@@ -54,15 +64,18 @@ func appendJSONL(path string, e AuditEntry) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
+	// Marshal first so we hold the mutex only across the OS write.
+	buf, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	auditFileMu.Lock()
+	defer auditFileMu.Unlock()
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	buf, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
 	if _, err := f.Write(append(buf, '\n')); err != nil {
 		return err
 	}

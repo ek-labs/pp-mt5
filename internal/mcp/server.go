@@ -120,6 +120,15 @@ func dispatch(ctx context.Context, args ...string) (*mcp.CallToolResult, error) 
 		)), nil
 	}
 	writeLogLine(args, 0, "")
+	// Success: include stderr too if the command wrote any. The audit-write
+	// path screams to stderr when persisting a confirmed write fails — the
+	// command still exits 0 because the broker action already happened, but
+	// the agent (and the human reading the agent's transcript) MUST see the
+	// 'reconcile from broker history' warning or they'll trust a phantom
+	// success. A bare ToolResultText(stdout) would drop that line on the floor.
+	if errStr := strings.TrimSpace(stderr.String()); errStr != "" {
+		return mcp.NewToolResultText(stdout.String() + "\n--- stderr ---\n" + errStr), nil
+	}
 	return mcp.NewToolResultText(stdout.String()), nil
 }
 
@@ -403,9 +412,9 @@ func tools() []toolReg {
 				mcp.WithDescription(`Send a market order through the full safety pipeline.
 
 WITHOUT 'confirm': dry-run. Returns a SHA-256 intent hash. Surface the dry-run summary to the human and ask for explicit approval.
-WITH 'confirm' set to the printed hash: executes if the hash matches within the 60-second window and (for real accounts) MT5_LIVE=1 + i_understand_this_is_live are set.
+WITH 'confirm' set to the printed hash: executes if the hash matches within the 60–120s bucketed window (the hash is valid for the current 60s bucket and the previous one, so the user has the full 60s minimum to type it) and (for real accounts) MT5_LIVE=1 + i_understand_this_is_live are set.
 
-The hash binds symbol/side/volume/sl/tp — not live price — so it survives normal tick movement. The safety layer rejects with exit 6 if the gate isn't passed; the broker rejects with exit 5.`),
+The hash binds symbol/side/volume/sl/tp/deviation — not live price — so it survives normal tick movement but a wider deviation can't be slipped through under a hash shown for a tighter one. The safety layer rejects with exit 6 if the gate isn't passed; the broker rejects with exit 5.`),
 				mcp.WithString("symbol", mcp.Required()),
 				mcp.WithString("side", mcp.Required(), mcp.Description("'buy' or 'sell'")),
 				mcp.WithNumber("volume", mcp.Required(), mcp.Description("Lots")),

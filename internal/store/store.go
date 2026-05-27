@@ -153,27 +153,45 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// applyOneMigration runs a single migration inside an immediate transaction.
-// The pre-check inside the tx is the lock: under SQLite WAL the BEGIN
-// IMMEDIATE acquires the reserved lock; a concurrent process trying the
-// same migration will block on busy_timeout (configured in the DSN), then
-// see the already-applied row and skip.
+// applyOneMigration runs a single migration inside an immediate transaction
+// on a PINNED connection (db.Conn). The pre-check inside the tx is the lock:
+// under SQLite WAL the BEGIN IMMEDIATE acquires the reserved lock; a
+// concurrent process trying the same migration will block on busy_timeout
+// (configured in the DSN), then see the already-applied row and skip.
+//
+// Why db.Conn and not db.ExecContext or db.BeginTx:
+//   - db.ExecContext on a *sql.DB pool is not guaranteed to dispatch every
+//     call to the same physical connection. BEGIN on connection A and the
+//     body on connection B leaves B running in autocommit mode and A holding
+//     a dangling transaction.
+//   - db.BeginTx pins a connection but issues plain BEGIN (deferred), not
+//     BEGIN IMMEDIATE, so concurrent readers can sneak between our pre-check
+//     and the first write of the migration body.
 func applyOneMigration(ctx context.Context, db *sql.DB, m migration, body string) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("pin migration connection for %s: %w", m.Name, err)
+	}
+	defer conn.Close()
+
 	// BEGIN IMMEDIATE acquires the reserved lock up front so concurrent
 	// readers don't slip in between our pre-check and the DDL.
-	if _, err := db.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("acquire migration lock for %s: %w", m.Name, err)
 	}
-	rollback := func() { _, _ = db.ExecContext(ctx, `ROLLBACK`) }
+	rollback := func() { _, _ = conn.ExecContext(ctx, `ROLLBACK`) }
 
 	// Re-check under the lock — another process may have applied this
 	// while we were waiting for the busy_timeout window.
 	var seen int
-	err := db.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT 1 FROM schema_migrations WHERE version = ?`, m.Version).Scan(&seen)
 	if err == nil {
 		// Already applied by a concurrent process; nothing to do.
-		_, _ = db.ExecContext(ctx, `COMMIT`)
+		if _, cerr := conn.ExecContext(ctx, `COMMIT`); cerr != nil {
+			rollback()
+			return fmt.Errorf("commit no-op migration %s: %w", m.Name, cerr)
+		}
 		return nil
 	}
 	if err != sql.ErrNoRows {
@@ -181,16 +199,16 @@ func applyOneMigration(ctx context.Context, db *sql.DB, m migration, body string
 		return fmt.Errorf("re-check migration %s under lock: %w", m.Name, err)
 	}
 
-	if _, err := db.ExecContext(ctx, body); err != nil {
+	if _, err := conn.ExecContext(ctx, body); err != nil {
 		rollback()
 		return fmt.Errorf("apply migration %s: %w", m.Name, err)
 	}
-	if _, err := db.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO schema_migrations(version) VALUES (?)`, m.Version); err != nil {
 		rollback()
 		return fmt.Errorf("record migration %s: %w", m.Name, err)
 	}
-	if _, err := db.ExecContext(ctx, `COMMIT`); err != nil {
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		rollback()
 		return fmt.Errorf("commit migration %s: %w", m.Name, err)
 	}

@@ -527,22 +527,30 @@ Safety flow:
 }
 
 // checkPositionCapLive queries the live position count via the bridge and
-// hands it to safety.CheckPositionCap. Best-effort: a bridge error returns
-// nil so a transient terminal hiccup doesn't block trading. The
-// max_open_positions guardrail is advisory, not load-bearing.
+// hands it to safety.CheckPositionCap. Fail-closed: a bridge error rejects
+// the order rather than silently allowing it — a safety guardrail that
+// disables itself on transient errors is worse than no guardrail because
+// it builds false confidence.
 func checkPositionCapLive(ctx context.Context, b *bridge.Bridge, g safety.Guardrails, wouldAdd bool) error {
 	if g.MaxOpenPositions <= 0 {
 		return nil
 	}
 	positions, err := b.PositionsGet(nil)
 	if err != nil {
-		return nil
+		return fmt.Errorf("max_open_positions guardrail: cannot determine current position count (bridge error: %w) — refusing the order; retry once the bridge is healthy or set max_open_positions=0 to disable", err)
 	}
 	return safety.CheckPositionCap(g, len(positions), wouldAdd)
 }
 
 // checkDailyLossLive sums today's realized P&L from the deals table (UTC
-// day boundary). Best-effort: returns nil on query error.
+// day boundary). Fail-closed: a DB error rejects the order.
+//
+// Entry filter covers every MT5 entry type that carries realized P&L:
+//   - 'out'    — straight close
+//   - 'inout'  — reverse / partial close that flips side (netting)
+//   - 'out_by' — closed-by-opposite-position (netting/hedging)
+//
+// 'in' alone never realizes P&L. position_id<>0 strips balance/credit deals.
 func checkDailyLossLive(ctx context.Context, db *sql.DB, acct int64, g safety.Guardrails) error {
 	if g.MaxDailyLoss <= 0 {
 		return nil
@@ -552,10 +560,11 @@ func checkDailyLossLive(ctx context.Context, db *sql.DB, acct int64, g safety.Gu
 	err := db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(profit + commission + swap + fee), 0)
 		 FROM deals
-		 WHERE account_login = ? AND time_ms >= ? AND position_id <> 0 AND entry = 'out'`,
+		 WHERE account_login = ? AND time_ms >= ? AND position_id <> 0
+		   AND entry IN ('out', 'inout', 'out_by')`,
 		acct, dayStart).Scan(&realized)
 	if err != nil {
-		return nil
+		return fmt.Errorf("max_daily_loss guardrail: cannot read today's realized P&L from store (DB error: %w) — refusing the order; run `pp-mt5 sync deals` or set max_daily_loss=0 to disable", err)
 	}
 	return safety.CheckDailyLoss(g, realized)
 }
