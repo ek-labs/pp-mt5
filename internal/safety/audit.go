@@ -18,14 +18,12 @@ import (
 	"time"
 )
 
-// auditFileMu serializes JSONL appends within a single process so two
-// goroutines never race the OpenFile/Write/Close cycle. Cross-process
-// safety relies on the OS guarantee that a single write() to an O_APPEND
-// fd is atomic for sizes below PIPE_BUF on POSIX (4096+ bytes — JSON
-// audit lines are smaller) and that FILE_APPEND_DATA on Windows is
-// atomic per WriteFile call. Both hold here because appendJSONL issues
-// the JSON + '\n' in one f.Write call.
+// auditFileMu serializes JSONL appends within a single process. appendJSONL
+// also takes a cooperative lock file so separate pp-mt5/pp-mt5-mcp processes
+// do not interleave the OpenFile/Write/Close cycle.
 var auditFileMu sync.Mutex
+
+const auditLockStaleAfter = 30 * time.Second
 
 // AuditEntry is one row in the log.
 type AuditEntry struct {
@@ -48,7 +46,7 @@ func AppendAudit(ctx context.Context, db *sql.DB, jsonlPath string, e AuditEntry
 		e.TimeMS = time.Now().UnixMilli()
 	}
 	if jsonlPath != "" {
-		if err := appendJSONL(jsonlPath, e); err != nil {
+		if err := appendJSONL(ctx, jsonlPath, e); err != nil {
 			return fmt.Errorf("append audit jsonl: %w", err)
 		}
 	}
@@ -60,7 +58,10 @@ func AppendAudit(ctx context.Context, db *sql.DB, jsonlPath string, e AuditEntry
 	return nil
 }
 
-func appendJSONL(path string, e AuditEntry) error {
+func appendJSONL(ctx context.Context, path string, e AuditEntry) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
@@ -71,15 +72,53 @@ func appendJSONL(path string, e AuditEntry) error {
 	}
 	auditFileMu.Lock()
 	defer auditFileMu.Unlock()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
+	return withAuditFileLock(ctx, path+".lock", func() error {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := f.Write(append(buf, '\n')); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func withAuditFileLock(ctx context.Context, lockPath string, fn func() error) error {
+	for {
+		f, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			if _, writeErr := fmt.Fprintf(f, "pid=%d time=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano)); writeErr != nil {
+				_ = f.Close()
+				_ = os.Remove(lockPath)
+				return writeErr
+			}
+			if closeErr := f.Close(); closeErr != nil {
+				_ = os.Remove(lockPath)
+				return closeErr
+			}
+			defer os.Remove(lockPath)
+			return fn()
+		}
+		if !os.IsExist(err) {
+			return err
+		}
+		if lockIsStale(lockPath) {
+			_ = os.Remove(lockPath)
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
-	defer f.Close()
-	if _, err := f.Write(append(buf, '\n')); err != nil {
-		return err
-	}
-	return nil
+}
+
+func lockIsStale(lockPath string) bool {
+	st, err := os.Stat(lockPath)
+	return err == nil && time.Since(st.ModTime()) > auditLockStaleAfter
 }
 
 func insertAuditRow(ctx context.Context, db *sql.DB, e AuditEntry) error {

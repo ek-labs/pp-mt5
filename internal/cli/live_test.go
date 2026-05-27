@@ -3,6 +3,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/mvanhorn/printing-press-library/library/trading/mt5/internal/bridge"
 )
 
 func TestValidateCloseAllFilter(t *testing.T) {
@@ -94,11 +96,11 @@ func TestRetcodeNameForNoChanges(t *testing.T) {
 
 func TestLooksLikeWriteDoesNotFlagPRAGMA(t *testing.T) {
 	cases := map[string]bool{
-		"SELECT * FROM deals":                     false,
-		"PRAGMA table_info(deals)":                false, // read-only PRAGMA must pass
-		"pragma  schema_version":                  false,
-		"INSERT INTO deals VALUES (1)":            true,
-		"  DELETE FROM audit  ":                   true,
+		"SELECT * FROM deals":                    false,
+		"PRAGMA table_info(deals)":               false, // read-only PRAGMA must pass
+		"pragma  schema_version":                 false,
+		"INSERT INTO deals VALUES (1)":           true,
+		"  DELETE FROM audit  ":                  true,
 		"WITH x AS (SELECT 1) DELETE FROM audit": false, // prefix-only by design; engine RO catches it
 	}
 	for q, want := range cases {
@@ -133,5 +135,18 @@ func TestHashableIntentKeepsDeviationStripsPrice(t *testing.T) {
 		if _, ok := out[k]; !ok {
 			t.Errorf("hashableIntent dropped %q which is user intent", k)
 		}
+	}
+}
+
+func TestRealizedPnLFromDealsFiltersClosingEntries(t *testing.T) {
+	deals := []bridge.Deal{
+		{Entry: 0, PositionID: 1, Profit: 100}, // opening trade: unrealized
+		{Entry: 1, PositionID: 1, Profit: -50, Commission: -1, Swap: -2, Fee: -3},
+		{Entry: 2, PositionID: 2, Profit: 25, Commission: -1},
+		{Entry: 3, PositionID: 3, Profit: 10},
+		{Entry: 1, PositionID: 0, Profit: -999}, // balance/credit style deal
+	}
+	if got, want := realizedPnLFromDeals(deals), -22.0; got != want {
+		t.Errorf("realizedPnLFromDeals() = %g, want %g", got, want)
 	}
 }

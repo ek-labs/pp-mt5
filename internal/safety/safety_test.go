@@ -1,6 +1,8 @@
 package safety
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,12 +115,12 @@ func TestCheckPositionCap(t *testing.T) {
 		wouldAdd    bool
 		shouldError bool
 	}{
-		{0, 99, true, false},  // 0 = disabled
-		{5, 4, true, false},   // would put count at 5, equal to max — OK
-		{5, 5, true, true},    // would put count at 6, over — reject
-		{5, 5, false, false},  // close action, not adding — OK
-		{1, 1, true, true},    // edge: 1 max, 1 open, want to add
-		{1, 0, true, false},   // edge: 1 max, 0 open, want to add
+		{0, 99, true, false}, // 0 = disabled
+		{5, 4, true, false},  // would put count at 5, equal to max — OK
+		{5, 5, true, true},   // would put count at 6, over — reject
+		{5, 5, false, false}, // close action, not adding — OK
+		{1, 1, true, true},   // edge: 1 max, 1 open, want to add
+		{1, 0, true, false},  // edge: 1 max, 0 open, want to add
 	}
 	for _, c := range cases {
 		err := CheckPositionCap(Guardrails{MaxOpenPositions: c.max}, c.current, c.wouldAdd)
@@ -136,13 +138,13 @@ func TestCheckDailyLoss(t *testing.T) {
 		realized    float64 // signed today's P&L
 		shouldError bool
 	}{
-		{0, -10000, false},   // 0 = disabled
-		{500, 0, false},      // flat
-		{500, -100, false},   // small loss, under floor
-		{500, -499.99, false},// just under
-		{500, -500, true},    // exactly at floor → halt
-		{500, -800, true},    // well past floor
-		{500, 250, false},    // profitable day
+		{0, -10000, false},    // 0 = disabled
+		{500, 0, false},       // flat
+		{500, -100, false},    // small loss, under floor
+		{500, -499.99, false}, // just under
+		{500, -500, true},     // exactly at floor → halt
+		{500, -800, true},     // well past floor
+		{500, 250, false},     // profitable day
 	}
 	for _, c := range cases {
 		err := CheckDailyLoss(Guardrails{MaxDailyLoss: c.max}, c.realized)
@@ -170,5 +172,42 @@ func TestHashBindsDeviation(t *testing.T) {
 	hWide, _ := Hash(wide)
 	if hBase == hWide {
 		t.Fatalf("hash did not change when deviation changed (%s == %s); confirm-with-wide-deviation would slip through", hBase, hWide)
+	}
+}
+
+func TestAppendJSONLUsesAndCleansLockFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	err := appendJSONL(context.Background(), path, AuditEntry{
+		Command: "order_send",
+		Request: json.RawMessage(`{"symbol":"EURUSD"}`),
+		Hash:    "abc",
+		Mode:    "dry-run",
+	})
+	if err != nil {
+		t.Fatalf("appendJSONL: %v", err)
+	}
+	if _, err := os.Stat(path + ".lock"); !os.IsNotExist(err) {
+		t.Fatalf("lock file should be cleaned up, stat err=%v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit jsonl: %v", err)
+	}
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		t.Fatalf("audit jsonl should contain a newline-terminated row, got %q", string(data))
+	}
+}
+
+func TestAppendJSONLReturnsWhenLockIsHeldAndContextCancels(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(path+".lock", []byte("held"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := appendJSONL(ctx, path, AuditEntry{Command: "order_send", Request: json.RawMessage(`{}`), Hash: "abc", Mode: "dry-run"})
+	if err == nil {
+		t.Fatal("appendJSONL should fail once context expires while another process holds the lock")
 	}
 }

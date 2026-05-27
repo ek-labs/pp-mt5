@@ -515,7 +515,7 @@ Safety flow:
 			if err := checkPositionCapLive(cmd.Context(), b, g, true); err != nil {
 				return ctx.reject(db, acc.Login, req, err)
 			}
-			if err := checkDailyLossLive(cmd.Context(), db, acc.Login, g); err != nil {
+			if err := checkDailyLossLive(cmd.Context(), b, g); err != nil {
 				return ctx.reject(db, acc.Login, req, err)
 			}
 			return ctx.runOrderSend(b, db, acc, req)
@@ -542,31 +542,40 @@ func checkPositionCapLive(ctx context.Context, b *bridge.Bridge, g safety.Guardr
 	return safety.CheckPositionCap(g, len(positions), wouldAdd)
 }
 
-// checkDailyLossLive sums today's realized P&L from the deals table (UTC
-// day boundary). Fail-closed: a DB error rejects the order.
+// checkDailyLossLive sums today's realized P&L from live MT5 deal history
+// using a UTC day boundary. Fail-closed: a bridge error rejects the order.
 //
 // Entry filter covers every MT5 entry type that carries realized P&L:
-//   - 'out'    — straight close
-//   - 'inout'  — reverse / partial close that flips side (netting)
-//   - 'out_by' — closed-by-opposite-position (netting/hedging)
+//   - out    - straight close
+//   - inout  - reverse / partial close that flips side (netting)
+//   - out_by - closed-by-opposite-position (netting/hedging)
 //
 // 'in' alone never realizes P&L. position_id<>0 strips balance/credit deals.
-func checkDailyLossLive(ctx context.Context, db *sql.DB, acct int64, g safety.Guardrails) error {
+func checkDailyLossLive(ctx context.Context, b *bridge.Bridge, g safety.Guardrails) error {
 	if g.MaxDailyLoss <= 0 {
 		return nil
 	}
-	dayStart := time.Now().UTC().Truncate(24 * time.Hour).UnixMilli()
-	var realized float64
-	err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(profit + commission + swap + fee), 0)
-		 FROM deals
-		 WHERE account_login = ? AND time_ms >= ? AND position_id <> 0
-		   AND entry IN ('out', 'inout', 'out_by')`,
-		acct, dayStart).Scan(&realized)
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	deals, err := b.HistoryDealsGet(dayStart.Unix(), now.Unix())
 	if err != nil {
-		return fmt.Errorf("max_daily_loss guardrail: cannot read today's realized P&L from store (DB error: %w) — refusing the order; run `pp-mt5 sync deals` or set max_daily_loss=0 to disable", err)
+		return fmt.Errorf("max_daily_loss guardrail: cannot fetch today's live deal history (bridge error: %w) - refusing the order; retry once the bridge is healthy or set max_daily_loss=0 to disable", err)
 	}
-	return safety.CheckDailyLoss(g, realized)
+	return safety.CheckDailyLoss(g, realizedPnLFromDeals(deals))
+}
+
+func realizedPnLFromDeals(deals []bridge.Deal) float64 {
+	var realized float64
+	for _, d := range deals {
+		if d.PositionID == 0 {
+			continue
+		}
+		switch d.Entry {
+		case 1, 2, 3: // out, inout, out_by
+			realized += d.Profit + d.Commission + d.Swap + d.Fee
+		}
+	}
+	return realized
 }
 
 func addOrderFlags(cmd *cobra.Command) {
@@ -901,10 +910,10 @@ func (w writeCtx) openAll() (*bridge.Bridge, *sql.DB, *bridge.AccountInfo, safet
 
 // runOrderSend runs the dry-run-or-execute flow for a single order_send.
 //
-// The HASH covers user intent (symbol/side/volume/sl/tp/magic/position) only —
-// not the live market price, which changes every tick and would invalidate
-// every confirm. The broker's deviation field absorbs price moves within the
-// 60-second window.
+// The HASH covers user intent (symbol/side/volume/sl/tp/deviation/magic/
+// position) only, not the live market price, which changes every tick and
+// would invalidate every confirm. The broker's deviation field absorbs price
+// moves within the 60-120s bucketed window.
 func (w writeCtx) runOrderSend(b *bridge.Bridge, db *sql.DB, acc *bridge.AccountInfo, req map[string]any) error {
 	cfg, _ := config.Load("")
 	g := safety.Guardrails{
@@ -1213,7 +1222,6 @@ func lookupVolumeStep(ctx context.Context, db *sql.DB, acct int64, symbol string
 	return step
 }
 
-
 // ── risk preview ─────────────────────────────────────────────────────────────
 //
 // Joins order_calc_margin + order_calc_profit at ±N pips + current account
@@ -1439,4 +1447,3 @@ func truncate(s string, n int) string {
 	}
 	return s[:n-1] + "…"
 }
-

@@ -25,9 +25,9 @@ func TestLooksLikeSQLWrite(t *testing.T) {
 		// (table_info, schema_version, database_list) are legitimate
 		// diagnostics for the agent. Write PRAGMAs fail at the engine on
 		// the RO connection mt5_sql uses.
-		"  PRAGMA journal_mode = wal":  false,
-		"pragma table_info(deals)":     false,
-		"replace into foo values":      true,
+		"  PRAGMA journal_mode = wal": false,
+		"pragma table_info(deals)":    false,
+		"replace into foo values":     true,
 	}
 	for in, want := range cases {
 		if got := looksLikeSQLWrite(in); got != want {
@@ -46,6 +46,18 @@ func TestExitName(t *testing.T) {
 		if got := exitName(code); got != want {
 			t.Errorf("exitName(%d) = %q, want %q", code, got, want)
 		}
+	}
+}
+
+func TestAuditStderrWarningFiltersBenignStderr(t *testing.T) {
+	if got := auditStderrWarning("python debug line\nbridge trace\n"); got != "" {
+		t.Fatalf("benign stderr should be hidden on success, got %q", got)
+	}
+
+	in := "python debug line\nAUDIT failed to record confirmed write\n  reconcile from broker history\nlater noise\n"
+	want := "AUDIT failed to record confirmed write\n  reconcile from broker history"
+	if got := auditStderrWarning(in); got != want {
+		t.Fatalf("auditStderrWarning() = %q, want %q", got, want)
 	}
 }
 
@@ -133,10 +145,10 @@ func TestMt5SqlBlocksWrites(t *testing.T) {
 func TestArgHelpers(t *testing.T) {
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
-		"s":      "value",
-		"empty":  "",
-		"n":      float64(42),
-		"b":      true,
+		"s":     "value",
+		"empty": "",
+		"n":     float64(42),
+		"b":     true,
 	}
 
 	if got := stringArg(req, "s", "def"); got != "value" {

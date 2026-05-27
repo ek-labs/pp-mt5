@@ -120,16 +120,33 @@ func dispatch(ctx context.Context, args ...string) (*mcp.CallToolResult, error) 
 		)), nil
 	}
 	writeLogLine(args, 0, "")
-	// Success: include stderr too if the command wrote any. The audit-write
-	// path screams to stderr when persisting a confirmed write fails — the
-	// command still exits 0 because the broker action already happened, but
-	// the agent (and the human reading the agent's transcript) MUST see the
-	// 'reconcile from broker history' warning or they'll trust a phantom
-	// success. A bare ToolResultText(stdout) would drop that line on the floor.
-	if errStr := strings.TrimSpace(stderr.String()); errStr != "" {
-		return mcp.NewToolResultText(stdout.String() + "\n--- stderr ---\n" + errStr), nil
+	// Success: keep stdout parseable for JSON-producing tools. The one stderr
+	// case that must be surfaced on a zero exit is the audit persistence warning:
+	// the broker action already happened, but the local audit record failed.
+	if auditWarning := auditStderrWarning(stderr.String()); auditWarning != "" {
+		return mcp.NewToolResultText(stdout.String() + "\n--- audit warning ---\n" + auditWarning), nil
 	}
 	return mcp.NewToolResultText(stdout.String()), nil
+}
+
+func auditStderrWarning(stderr string) string {
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	kept := make([]string, 0, len(lines))
+	keepContinuation := false
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "AUDIT ") {
+			kept = append(kept, line)
+			keepContinuation = true
+			continue
+		}
+		if keepContinuation && strings.HasPrefix(line, "  ") {
+			kept = append(kept, line)
+			continue
+		}
+		keepContinuation = false
+	}
+	return strings.Join(kept, "\n")
 }
 
 // exitName puts a name on the documented exit codes so MCP clients can

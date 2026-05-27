@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -118,6 +119,48 @@ func TestOpenReadOnly_ErrorsIfMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sync") {
 		t.Errorf("error should mention sync remediation: %v", err)
+	}
+}
+
+func TestOpenAndMigrateConcurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	errs := make(chan error, 8)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			db, err := OpenAndMigrate(path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			errs <- db.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("OpenAndMigrate concurrent error: %v", err)
+		}
+	}
+
+	db, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly after concurrent migrate: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
+		t.Fatalf("count schema_migrations: %v", err)
+	}
+	migrations, err := listMigrations()
+	if err != nil {
+		t.Fatalf("list migrations: %v", err)
+	}
+	if n != len(migrations) {
+		t.Fatalf("schema_migrations count = %d, want %d", n, len(migrations))
 	}
 }
 
