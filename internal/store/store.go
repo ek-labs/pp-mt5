@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -133,8 +134,11 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	}
 
 	// Bootstrap schema_migrations before we can query for applied versions.
-	// IF NOT EXISTS makes this safe to re-run against any state.
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	// IF NOT EXISTS makes this safe to re-run against any state. Retried on
+	// SQLITE_BUSY: on a fresh database file, concurrent opens race the
+	// delete->WAL journal-mode conversion, which needs an exclusive lock and
+	// can surface an immediate BUSY that bypasses busy_timeout.
+	if err := execRetryBusy(ctx, db, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
 		applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
 	)`); err != nil {
@@ -151,6 +155,51 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// isBusyErr reports whether err is SQLite's BUSY/locked error. modernc.org's
+// driver formats these as "... database is locked (5) (SQLITE_BUSY)"; matching
+// the string avoids depending on the driver's error types directly.
+func isBusyErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "SQLITE_BUSY")
+}
+
+// execRetryBusy runs stmt against the pool, retrying SQLITE_BUSY with a short
+// backoff. busy_timeout in the DSN handles ordinary write contention; this
+// exists for the immediate-BUSY cases that bypass the busy handler (fresh-file
+// journal-mode conversion during concurrent opens).
+func execRetryBusy(ctx context.Context, db *sql.DB, stmt string) error {
+	return retryBusy(ctx, func() error {
+		_, err := db.ExecContext(ctx, stmt)
+		return err
+	})
+}
+
+// connExecRetryBusy is execRetryBusy against a pinned connection.
+func connExecRetryBusy(ctx context.Context, conn *sql.Conn, stmt string) error {
+	return retryBusy(ctx, func() error {
+		_, err := conn.ExecContext(ctx, stmt)
+		return err
+	})
+}
+
+func retryBusy(ctx context.Context, fn func() error) error {
+	const (
+		maxWait = 5 * time.Second
+		step    = 25 * time.Millisecond
+	)
+	deadline := time.Now().Add(maxWait)
+	for {
+		err := fn()
+		if !isBusyErr(err) || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(step):
+		}
+	}
 }
 
 // applyOneMigration runs a single migration inside an immediate transaction
@@ -175,8 +224,10 @@ func applyOneMigration(ctx context.Context, db *sql.DB, m migration, body string
 	defer conn.Close()
 
 	// BEGIN IMMEDIATE acquires the reserved lock up front so concurrent
-	// readers don't slip in between our pre-check and the DDL.
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	// readers don't slip in between our pre-check and the DDL. Retried on
+	// SQLITE_BUSY for the same fresh-file WAL-conversion race as the
+	// schema_migrations bootstrap.
+	if err := connExecRetryBusy(ctx, conn, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("acquire migration lock for %s: %w", m.Name, err)
 	}
 	rollback := func() { _, _ = conn.ExecContext(ctx, `ROLLBACK`) }
@@ -245,4 +296,3 @@ func listMigrations() ([]migration, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out, nil
 }
-
