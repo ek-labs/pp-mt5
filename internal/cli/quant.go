@@ -595,11 +595,18 @@ func buildFeatures(ctx context.Context, db *sql.DB, acct int64, symbol, tf strin
 		return 0, fmt.Errorf("only %d bar(s) for %s %s in window — sync more first", len(times), symbol, tf)
 	}
 
+	// Undefined transitions (first bar, or a non-positive close on either
+	// side) stay NaN so nullIfNaN stores NULL instead of a fake 0% move, and
+	// rollingStd skips them rather than biasing realized vol toward zero.
 	n := len(times)
 	rets := make([]float64, n)
 	logRets := make([]float64, n)
+	for i := range rets {
+		rets[i] = math.NaN()
+		logRets[i] = math.NaN()
+	}
 	for i := 1; i < n; i++ {
-		if closes[i-1] != 0 {
+		if closes[i-1] > 0 && closes[i] > 0 {
 			rets[i] = closes[i]/closes[i-1] - 1.0
 			logRets[i] = math.Log(closes[i] / closes[i-1])
 		}
@@ -967,10 +974,10 @@ func replayTicks(ctx context.Context, db *sql.DB, w *bufio.Writer, acct int64, s
 	enc := json.NewEncoder(w)
 
 	var (
-		streamStart  int64
-		wallStart    = time.Now()
-		gotFirst     = false
-		n            int
+		streamStart int64
+		wallStart   = time.Now()
+		gotFirst    = false
+		n           int
 	)
 	for rows.Next() {
 		select {
@@ -1198,7 +1205,7 @@ func newBacktestListCmd() *cobra.Command {
 				       COALESCE(sharpe,0), COALESCE(max_dd_pct,0), COALESCE(trades,0),
 				       COALESCE(win_rate,0), created_at_ms
 				FROM backtests
-				WHERE account_login = ? OR account_login IS NULL
+				WHERE account_login = ?
 				ORDER BY id DESC LIMIT ?`, acct, limit)
 			if err != nil {
 				return err
@@ -1256,25 +1263,25 @@ func newBacktestListCmd() *cobra.Command {
 
 // BacktestResult is the structured output of a v1 sma-cross backtest.
 type BacktestResult struct {
-	ID           int64          `json:"id,omitempty"`
-	Strategy     string         `json:"strategy"`
-	Symbol       string         `json:"symbol"`
-	TF           string         `json:"tf"`
-	FromMS       int64          `json:"from_ms"`
-	ToMS         int64          `json:"to_ms"`
-	BarsScanned  int            `json:"bars_scanned"`
-	Trades       int            `json:"trades"`
-	Wins         int            `json:"wins"`
-	Losses       int            `json:"losses"`
-	WinRate      float64        `json:"win_rate"`
-	GrossProfit  float64        `json:"gross_profit"`
-	GrossLoss    float64        `json:"gross_loss"`
-	NetProfit    float64        `json:"net_profit"`
-	ProfitFactor float64        `json:"profit_factor"`
-	Sharpe       float64        `json:"sharpe_daily_annualized"`
-	MaxDDPct     float64        `json:"max_dd_pct"`
-	FinalEquity  float64        `json:"final_equity"`
-	StartEquity  float64        `json:"start_equity"`
+	ID           int64   `json:"id,omitempty"`
+	Strategy     string  `json:"strategy"`
+	Symbol       string  `json:"symbol"`
+	TF           string  `json:"tf"`
+	FromMS       int64   `json:"from_ms"`
+	ToMS         int64   `json:"to_ms"`
+	BarsScanned  int     `json:"bars_scanned"`
+	Trades       int     `json:"trades"`
+	Wins         int     `json:"wins"`
+	Losses       int     `json:"losses"`
+	WinRate      float64 `json:"win_rate"`
+	GrossProfit  float64 `json:"gross_profit"`
+	GrossLoss    float64 `json:"gross_loss"`
+	NetProfit    float64 `json:"net_profit"`
+	ProfitFactor float64 `json:"profit_factor"`
+	Sharpe       float64 `json:"sharpe_daily_annualized"`
+	MaxDDPct     float64 `json:"max_dd_pct"`
+	FinalEquity  float64 `json:"final_equity"`
+	StartEquity  float64 `json:"start_equity"`
 }
 
 // runSMACrossBacktest: long-only SMA cross. Buy when fast > slow, flat when
@@ -1329,10 +1336,10 @@ func runSMACrossBacktest(ctx context.Context, db *sql.DB,
 	// bar's close and fill at the same close (the lookahead documented in
 	// the docstring above). Slippage is approximated by costPerTrade on
 	// round-trip.
-	pos := 0      // 0 = flat, 1 = long
+	pos := 0 // 0 = flat, 1 = long
 	entryPx := 0.0
 	var (
-		trades, wins, losses int
+		trades, wins, losses   int
 		grossProfit, grossLoss float64
 		netProfit              = 0.0
 	)
@@ -1425,10 +1432,10 @@ func runSMACrossBacktest(ctx context.Context, db *sql.DB,
 	sharpe := computeBTSharpe(dailyEquity, startEquity)
 
 	return &BacktestResult{
-		Strategy:    "sma-cross",
-		Symbol:      symbol,
-		TF:          tf,
-		FromMS:      fromMS, ToMS: toMS,
+		Strategy: "sma-cross",
+		Symbol:   symbol,
+		TF:       tf,
+		FromMS:   fromMS, ToMS: toMS,
 		BarsScanned:  len(closes),
 		Trades:       trades,
 		Wins:         wins,

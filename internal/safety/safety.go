@@ -40,9 +40,9 @@ const Window = 60 * time.Second
 type Mode int
 
 const (
-	ModePaper Mode = iota // not on a real account, or MT5_PAPER=1
-	ModeLive              // real account + MT5_LIVE=1 + --i-understand-this-is-live
-	ModeDryRun            // --dry-run explicitly set (always show hash, never send)
+	ModePaper  Mode = iota // not on a real account, or MT5_PAPER=1
+	ModeLive               // real account + MT5_LIVE=1 + --i-understand-this-is-live
+	ModeDryRun             // --dry-run explicitly set (always show hash, never send)
 )
 
 // CurrentMode reports the trading mode the current PROCESS is in based on env

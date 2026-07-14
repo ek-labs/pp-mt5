@@ -33,15 +33,15 @@ func (e *ExitErr) Unwrap() error { return e.Err }
 
 // Exit constants documented in cmd/pp-mt5/main.go.
 const (
-	ExitOK              = 0
-	ExitUsage           = 2
-	ExitNotFound        = 3
-	ExitAuth            = 4
-	ExitBrokerRejected  = 5
-	ExitSafetyRejected  = 6
-	ExitRateLimited     = 7
-	ExitConfig          = 10
-	ExitTerminalDown    = 11
+	ExitOK             = 0
+	ExitUsage          = 2
+	ExitNotFound       = 3
+	ExitAuth           = 4
+	ExitBrokerRejected = 5
+	ExitSafetyRejected = 6
+	ExitRateLimited    = 7
+	ExitConfig         = 10
+	ExitTerminalDown   = 11
 )
 
 // ErrNotImplemented marks scaffolded commands whose handler hasn't landed yet.

@@ -44,14 +44,14 @@ var bridgeScript []byte
 // Callers pattern-match on these to map to the right cli.ExitErr.Code.
 
 var (
-	ErrNotLoggedIn      = errors.New("mt5: not logged in")
-	ErrTerminalDown     = errors.New("mt5: terminal not running or not reachable")
-	ErrBrokerRejected   = errors.New("mt5: broker rejected order")
-	ErrRateLimited      = errors.New("mt5: rate limited by broker")
-	ErrPythonMissing    = errors.New("python: not found on PATH")
-	ErrMT5PkgMissing    = errors.New("python: MetaTrader5 package not installed")
-	ErrInvalidParams    = errors.New("bridge: invalid params")
-	ErrBridgeInternal   = errors.New("bridge: internal error")
+	ErrNotLoggedIn    = errors.New("mt5: not logged in")
+	ErrTerminalDown   = errors.New("mt5: terminal not running or not reachable")
+	ErrBrokerRejected = errors.New("mt5: broker rejected order")
+	ErrRateLimited    = errors.New("mt5: rate limited by broker")
+	ErrPythonMissing  = errors.New("python: not found on PATH")
+	ErrMT5PkgMissing  = errors.New("python: MetaTrader5 package not installed")
+	ErrInvalidParams  = errors.New("bridge: invalid params")
+	ErrBridgeInternal = errors.New("bridge: internal error")
 )
 
 // errFromCode maps a bridge error code string to a Go sentinel.

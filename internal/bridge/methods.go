@@ -9,34 +9,34 @@ package bridge
 
 // AccountInfo mirrors mt5.account_info()._asdict().
 type AccountInfo struct {
-	Login              int64   `json:"login"`
-	TradeMode          int     `json:"trade_mode"`     // 0=demo 1=contest 2=real
-	Leverage           int64   `json:"leverage"`
-	LimitOrders        int     `json:"limit_orders"`
-	MarginSOMode       int     `json:"margin_so_mode"`
-	TradeAllowed       bool    `json:"trade_allowed"`
-	TradeExpert        bool    `json:"trade_expert"`
-	MarginMode         int     `json:"margin_mode"`
-	CurrencyDigits     int     `json:"currency_digits"`
-	FIFOClose          bool    `json:"fifo_close"`
-	Balance            float64 `json:"balance"`
-	Credit             float64 `json:"credit"`
-	Profit             float64 `json:"profit"`
-	Equity             float64 `json:"equity"`
-	Margin             float64 `json:"margin"`
-	MarginFree         float64 `json:"margin_free"`
-	MarginLevel        float64 `json:"margin_level"`
-	MarginSOCall       float64 `json:"margin_so_call"`
-	MarginSOSO         float64 `json:"margin_so_so"`
-	MarginInitial      float64 `json:"margin_initial"`
-	MarginMaintenance  float64 `json:"margin_maintenance"`
-	Assets             float64 `json:"assets"`
-	Liabilities        float64 `json:"liabilities"`
-	CommissionBlocked  float64 `json:"commission_blocked"`
-	Name               string  `json:"name"`
-	Server             string  `json:"server"`
-	Currency           string  `json:"currency"`
-	Company            string  `json:"company"`
+	Login             int64   `json:"login"`
+	TradeMode         int     `json:"trade_mode"` // 0=demo 1=contest 2=real
+	Leverage          int64   `json:"leverage"`
+	LimitOrders       int     `json:"limit_orders"`
+	MarginSOMode      int     `json:"margin_so_mode"`
+	TradeAllowed      bool    `json:"trade_allowed"`
+	TradeExpert       bool    `json:"trade_expert"`
+	MarginMode        int     `json:"margin_mode"`
+	CurrencyDigits    int     `json:"currency_digits"`
+	FIFOClose         bool    `json:"fifo_close"`
+	Balance           float64 `json:"balance"`
+	Credit            float64 `json:"credit"`
+	Profit            float64 `json:"profit"`
+	Equity            float64 `json:"equity"`
+	Margin            float64 `json:"margin"`
+	MarginFree        float64 `json:"margin_free"`
+	MarginLevel       float64 `json:"margin_level"`
+	MarginSOCall      float64 `json:"margin_so_call"`
+	MarginSOSO        float64 `json:"margin_so_so"`
+	MarginInitial     float64 `json:"margin_initial"`
+	MarginMaintenance float64 `json:"margin_maintenance"`
+	Assets            float64 `json:"assets"`
+	Liabilities       float64 `json:"liabilities"`
+	CommissionBlocked float64 `json:"commission_blocked"`
+	Name              string  `json:"name"`
+	Server            string  `json:"server"`
+	Currency          string  `json:"currency"`
+	Company           string  `json:"company"`
 }
 
 // TradeModeName returns "demo", "contest", "real", or "unknown(N)" for printing.
@@ -86,11 +86,11 @@ type TerminalInfo struct {
 // InitializeOptions mirrors the kwargs to mt5.initialize().
 // All fields are optional; pass an empty struct to connect to a running terminal.
 type InitializeOptions struct {
-	Path     string `json:"path,omitempty"`     // path to terminal64.exe
+	Path     string `json:"path,omitempty"` // path to terminal64.exe
 	Login    int64  `json:"login,omitempty"`
 	Password string `json:"password,omitempty"`
 	Server   string `json:"server,omitempty"`
-	Timeout  int    `json:"timeout,omitempty"`   // ms
+	Timeout  int    `json:"timeout,omitempty"` // ms
 	Portable bool   `json:"portable,omitempty"`
 }
 

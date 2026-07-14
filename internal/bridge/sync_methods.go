@@ -1,5 +1,7 @@
 package bridge
 
+import "fmt"
+
 // Typed wrappers for methods used by `pp-mt5 sync`. Loose maps in many places
 // because MT5 keeps adding fields broker-by-broker — strict structs would
 // reject unknown keys; the SQL schema only stores what it cares about.
@@ -7,28 +9,28 @@ package bridge
 // SymbolInfo mirrors mt5.symbol_info()._asdict() — only the fields the store
 // schema persists; MT5 returns many more.
 type SymbolInfo struct {
-	Name           string  `json:"name"`
-	Description    string  `json:"description"`
-	Digits         int     `json:"digits"`
-	Point          float64 `json:"point"`
-	Spread         int     `json:"spread"`
+	Name              string  `json:"name"`
+	Description       string  `json:"description"`
+	Digits            int     `json:"digits"`
+	Point             float64 `json:"point"`
+	Spread            int     `json:"spread"`
 	TradeContractSize float64 `json:"trade_contract_size"`
-	VolumeMin      float64 `json:"volume_min"`
-	VolumeMax      float64 `json:"volume_max"`
-	VolumeStep     float64 `json:"volume_step"`
-	TradeMode      int     `json:"trade_mode"`
-	TradeCalcMode  int     `json:"trade_calc_mode"`
-	CurrencyBase   string  `json:"currency_base"`
-	CurrencyProfit string  `json:"currency_profit"`
-	MarginInitial  float64 `json:"margin_initial"`
+	VolumeMin         float64 `json:"volume_min"`
+	VolumeMax         float64 `json:"volume_max"`
+	VolumeStep        float64 `json:"volume_step"`
+	TradeMode         int     `json:"trade_mode"`
+	TradeCalcMode     int     `json:"trade_calc_mode"`
+	CurrencyBase      string  `json:"currency_base"`
+	CurrencyProfit    string  `json:"currency_profit"`
+	MarginInitial     float64 `json:"margin_initial"`
 }
 
 // Position mirrors mt5.positions_get() row.
 type Position struct {
 	Ticket       int64   `json:"ticket"`
-	Time         int64   `json:"time"`       // unix seconds
+	Time         int64   `json:"time"` // unix seconds
 	TimeUpdate   int64   `json:"time_update"`
-	Type         int     `json:"type"`        // 0=buy, 1=sell
+	Type         int     `json:"type"` // 0=buy, 1=sell
 	Magic        int64   `json:"magic"`
 	Identifier   int64   `json:"identifier"`
 	Reason       int     `json:"reason"`
@@ -72,7 +74,7 @@ type Deal struct {
 	Time       int64   `json:"time"`
 	TimeMSC    int64   `json:"time_msc"`
 	Type       int     `json:"type"`
-	Entry      int     `json:"entry"`    // 0=in 1=out 2=inout 3=out_by
+	Entry      int     `json:"entry"` // 0=in 1=out 2=inout 3=out_by
 	Magic      int64   `json:"magic"`
 	PositionID int64   `json:"position_id"`
 	Volume     float64 `json:"volume"`
@@ -105,14 +107,14 @@ type HistoryOrder struct {
 
 // Bar mirrors one row of mt5.copy_rates_range(). 'time' is unix seconds.
 type Bar struct {
-	Time        int64   `json:"time"`
-	Open        float64 `json:"open"`
-	High        float64 `json:"high"`
-	Low         float64 `json:"low"`
-	Close       float64 `json:"close"`
-	TickVolume  int64   `json:"tick_volume"`
-	Spread      int     `json:"spread"`
-	RealVolume  int64   `json:"real_volume"`
+	Time       int64   `json:"time"`
+	Open       float64 `json:"open"`
+	High       float64 `json:"high"`
+	Low        float64 `json:"low"`
+	Close      float64 `json:"close"`
+	TickVolume int64   `json:"tick_volume"`
+	Spread     int     `json:"spread"`
+	RealVolume int64   `json:"real_volume"`
 }
 
 // Tick mirrors one row of mt5.copy_ticks_range(). 'time' is unix seconds;
@@ -153,6 +155,12 @@ func (b *Bridge) PositionsGet(filter map[string]any) ([]Position, error) {
 	if err := b.Call("positions_get", filter, &out); err != nil {
 		return nil, err
 	}
+	// JSON null (MT5 failure) decodes to a nil slice; a genuinely flat account
+	// decodes to an empty non-nil slice. The bridge raises on None, but keep
+	// snapshot consumers from ever treating a failure as "no positions".
+	if out == nil {
+		return nil, fmt.Errorf("positions_get returned null — terminal failure, not an empty snapshot")
+	}
 	return out, nil
 }
 
@@ -164,6 +172,10 @@ func (b *Bridge) OrdersGet(filter map[string]any) ([]Order, error) {
 	var out []Order
 	if err := b.Call("orders_get", filter, &out); err != nil {
 		return nil, err
+	}
+	// See PositionsGet: nil means the terminal failed, not "no pending orders".
+	if out == nil {
+		return nil, fmt.Errorf("orders_get returned null — terminal failure, not an empty snapshot")
 	}
 	return out, nil
 }
@@ -209,7 +221,7 @@ func (b *Bridge) CopyTicksRange(symbol string, fromUnix, toUnix int64, flags str
 	}
 	var out []Tick
 	if err := b.Call("copy_ticks_range", map[string]any{
-		"symbol": symbol,
+		"symbol":    symbol,
 		"date_from": fromUnix, "date_to": toUnix,
 		"flags": flags,
 	}, &out); err != nil {
@@ -260,7 +272,7 @@ type SymbolTick struct {
 
 // BookItem is one rung of the depth-of-market book.
 type BookItem struct {
-	Type   int     `json:"type"`   // 1=sell 2=buy 3=sell_market 4=buy_market 5=sell_limit 6=buy_limit 7=sell_stop 8=buy_stop
+	Type   int     `json:"type"` // 1=sell 2=buy 3=sell_market 4=buy_market 5=sell_limit 6=buy_limit 7=sell_stop 8=buy_stop
 	Price  float64 `json:"price"`
 	Volume float64 `json:"volume"`
 }

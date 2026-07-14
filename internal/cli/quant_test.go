@@ -166,11 +166,11 @@ func TestNullIfNaN(t *testing.T) {
 
 func TestSanitizeFilename(t *testing.T) {
 	cases := map[string]string{
-		"EURUSD.s":   "EURUSD.s",
-		"foo/bar":    "foo_bar",
-		"foo\\bar":   "foo_bar",
-		"a:b*c?d":    "a_b_c_d",
-		"<x>|y\"z":   "_x__y_z",
+		"EURUSD.s": "EURUSD.s",
+		"foo/bar":  "foo_bar",
+		"foo\\bar": "foo_bar",
+		"a:b*c?d":  "a_b_c_d",
+		"<x>|y\"z": "_x__y_z",
 	}
 	for in, want := range cases {
 		if got := sanitizeFilename(in); got != want {
