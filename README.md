@@ -155,10 +155,10 @@ Streams from the local mirror. Works offline. `--granularity tick|bar:M1|bar:M5.
 ### Quant export
 
 ```bash
-pp-mt5 bars export --tf M1 --symbols "EUR*,XAU*" --since 2y --out parquet
+pp-mt5 bars export --tf M1 --symbols "EUR*,XAU*" --since 2y --format csv --out-dir ./exports
 ```
 
-Parquet, CSV, or JSONL. Reads the mirror; never touches the bridge.
+CSV or JSONL (`--format`); parquet is on the roadmap. Reads the mirror; never touches the bridge.
 
 ---
 
